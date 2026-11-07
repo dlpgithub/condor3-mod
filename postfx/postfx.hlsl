@@ -18,7 +18,7 @@
 #define AO_RADIUS        8.0     // metres
 #define AO_FADE_NEAR     1500.0  // metres: AO starts fading ...
 #define AO_FADE_FAR      6000.0  //         ... and is gone here
-#define SHARPEN          0.50    // local contrast / detail (0 = off)
+#define SHARPEN          0.70    // local contrast / detail (0 = off)
 #define VIGNETTE         0.18
 #define HAZE_STRENGTH    0.90    // extra blue depth separation of far terrain
 #define HAZE_DISTANCE    9000.0 // metres (fallback when no engine data)
@@ -248,7 +248,7 @@ float4 PS_Blur(VSO i) : SV_Target
 // ---------------------------------------------------------------- temporal anti-aliasing
 // The game renders every frame with a sub-pixel shifted viewport (Halton 2,3). Here the current frame is combined
 // with the previous result, reprojected with depth + camera motion, and clamped to the local colour range.
-#define TAA_BLEND 0.12      // weight of the new frame (lower = smoother but slower to settle)
+#define TAA_BLEND 0.08      // weight of the new frame (lower = smoother but slower to settle)
 
 float3 TAA_History(float2 px)
 {   // Catmull-Rom, 5 bilinear taps
@@ -335,7 +335,7 @@ TAAO PS_TAA(VSO i)
         float3 hc2 = clamp(h2, lo, hi);
         float dist2 = length(h2 - hc2);
         if (cockpit || dist2 < dist * 0.6) { h = h2; hc = hc2; dist = dist2; }
-        float k = saturate(TAA_BLEND + dist * 0.6);
+        float k = saturate(TAA_BLEND + dist * 0.35);
         res = lerp(hc, cur, k);
     }
     o.c = float4(res, 1);
@@ -349,13 +349,55 @@ float3 ACES(float3 x)
     return saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
 }
 
+
+// ---------------------------------------------------------------- spatial edge smoothing (FXAA-like, on the TAA result)
+#define EDGE_AA 0.85        // 0 = off
+float Luma2(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+
+float3 EdgeAA(int2 p)
+{
+    float3 cM = Scene(p);
+    {   // only geometry silhouettes (depth jumps): texture detail, text and needles must stay crisp
+        float d0 = LoadDepth(p);
+        float z0 = IsSky(d0) ? 1e5 : ViewZ(d0);
+        float edge = 0;
+        int2 o[4] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1) };
+        [unroll] for (int k = 0; k < 4; k++)
+        {
+            float dn = LoadDepth(p + o[k]);
+            float zn = IsSky(dn) ? 1e5 : ViewZ(dn);
+            edge = max(edge, abs(zn - z0) / max(min(zn, z0), 0.1));
+        }
+        if (edge < 0.03) return cM;
+    }
+    float3 cN = Scene(p + int2(0, -1)), cS = Scene(p + int2(0, 1)), cE = Scene(p + int2(1, 0)), cW = Scene(p + int2(-1, 0));
+    float lM = Luma2(cM), lN = Luma2(cN), lS = Luma2(cS), lE = Luma2(cE), lW = Luma2(cW);
+    float lmax = max(lM, max(max(lN, lS), max(lE, lW)));
+    float lmin = min(lM, min(min(lN, lS), min(lE, lW)));
+    float range = lmax - lmin;
+    if (range < max(0.04, lmax * 0.15)) return cM;
+    float lNW = Luma2(Scene(p + int2(-1, -1))), lNE = Luma2(Scene(p + int2(1, -1)));
+    float lSW = Luma2(Scene(p + int2(-1, 1))),  lSE = Luma2(Scene(p + int2(1, 1)));
+    float eH = abs(lNW + lNE - 2 * lN) + 2 * abs(lW + lE - 2 * lM) + abs(lSW + lSE - 2 * lS);
+    float eV = abs(lNW + lSW - 2 * lW) + 2 * abs(lN + lS - 2 * lM) + abs(lNE + lSE - 2 * lE);
+    bool horz = eH >= eV;
+    float l1 = horz ? lN : lW, l2 = horz ? lS : lE;
+    float sgn = (abs(l1 - lM) >= abs(l2 - lM)) ? -1.0 : 1.0;
+    float2 dir = horz ? float2(0, sgn) : float2(sgn, 0);
+    float3 cOff = g_t0.SampleLevel(g_lin, (float2(p) + 0.5 + dir * 0.5) * g_screen.zw, 0).rgb;
+    float avg = (2.0 * (lN + lS + lE + lW) + lNW + lNE + lSW + lSE) / 12.0;
+    float sub = saturate(abs(avg - lM) / max(range, 1e-4));
+    float w = saturate(0.5 + 0.5 * sub) * EDGE_AA;
+    return lerp(cM, cOff, w);
+}
+
 float4 PS_Final(VSO i) : SV_Target
 {
     int2 p = int2(i.pos.xy);
     float2 uv = i.pos.xy * g_screen.zw;
 
     // --- sharpen in display space, limited to the local range so it cannot ring
-    float3 c  = Scene(p);
+    float3 c  = EdgeAA(p);
     float3 cL = Scene(p + int2(-1, 0)), cR = Scene(p + int2(1, 0));
     float3 cU = Scene(p + int2(0, -1)), cD = Scene(p + int2(0, 1));
     float3 lo = min(c, min(min(cL, cR), min(cU, cD)));

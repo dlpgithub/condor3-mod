@@ -84,7 +84,7 @@ static void STDMETHODCALLTYPE ClearDsvHook(ID3D11DeviceContext* self, ID3D11Dept
             }
             if (g_vpLog > 0 && g_logf) { fprintf(g_logf, "vp: CLEAR main=%d flags=%u\n", isMain, flags); fflush(g_logf); }
             if (isMain && (flags & D3D11_CLEAR_STENCIL) && g_taa && g_core && !g_dead && g_mainW) {   // first clear of a frame: pick this frame's jitter
-                unsigned k = g_frames % 8;
+                unsigned k = g_frames % 16;
                 g_jx = Halton(k, 2) - 0.5f; g_jy = Halton(k, 3) - 0.5f; g_jitActive = 1;
             }
             if (isMain && (flags & D3D11_CLEAR_DEPTH)) {
