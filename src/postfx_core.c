@@ -39,6 +39,8 @@ typedef struct {
     float view[16];    // engine view matrix (column major, as in the engine's own constant buffer)
     float camPos[4];   // world camera position, w = atmosphere data valid
     float fog[4], sunDir[4], sunColor[4], amb[4];
+    float prevView[16];
+    float prevCam[4];
 } CBData;
 
 typedef struct { ID3D11Texture2D* tex; ID3D11ShaderResourceView* srv; ID3D11RenderTargetView* rtv; UINT w, h; } Target;
@@ -51,7 +53,7 @@ struct PfxCore {
     HRESULT (WINAPI *pCompile)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, void*, LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
 
     ID3D11VertexShader* vs;
-    ID3D11PixelShader *psBright, *psDown, *psBlur, *psAO, *psAOBlur, *psFinal, *psCapDepth;
+    ID3D11PixelShader *psBright, *psDown, *psBlur, *psAO, *psAOBlur, *psFinal, *psCapDepth, *psTAA;
     int shaderMS;                       // 1 when the shaders were compiled for a multisampled depth buffer
 
     ID3D11SamplerState *sLin, *sPoint;
@@ -61,7 +63,9 @@ struct PfxCore {
     ID3D11Buffer* cb;
 
     UINT w, h;
-    Target scene, ao, aoBlur, lv[LEVELS], tmp[LEVELS], capDepth;
+    Target scene, ao, aoBlur, lv[LEVELS], tmp[LEVELS], capDepth, taaOut, hist[2];
+    int histCur, histValid;
+    ID3D11RenderTargetView* rtv1;       // optional second render target of the next DrawPass
 
     ID3D11Texture2D* depthTex;          // cached depth view
     ID3D11ShaderResourceView* depthSrv;
@@ -111,7 +115,7 @@ static ID3DBlob* CompileEntry(PfxCore* c, const char* src, SIZE_T len, const D3D
 
 static void ReleaseShaders(PfxCore* c) {
     REL(c->vs); REL(c->psBright); REL(c->psDown); REL(c->psBlur); REL(c->psAO);
-    REL(c->psAOBlur); REL(c->psFinal); REL(c->psCapDepth);
+    REL(c->psAOBlur); REL(c->psFinal); REL(c->psCapDepth); REL(c->psTAA);
 }
 
 // (Re)compiles all shaders for the given depth variant. On failure the old shaders stay in place.
@@ -122,7 +126,7 @@ static int BuildShaders(PfxCore* c, int ms) {
     struct { const char* entry; ID3D11PixelShader** slot; ID3D11PixelShader* made; } ps[] = {
         { "PS_Bright", &c->psBright, NULL }, { "PS_Down", &c->psDown, NULL }, { "PS_Blur", &c->psBlur, NULL },
         { "PS_AO", &c->psAO, NULL }, { "PS_AOBlur", &c->psAOBlur, NULL }, { "PS_Final", &c->psFinal, NULL },
-        { "PS_CapDepth", &c->psCapDepth, NULL },
+        { "PS_CapDepth", &c->psCapDepth, NULL }, { "PS_TAA", &c->psTAA, NULL },
     };
     ID3D11VertexShader* vs = NULL;
     ID3DBlob* b;
@@ -195,6 +199,10 @@ static int EnsureSize(PfxCore* c, UINT w, UINT h) {
     int i, ok = 1;
     if (c->w == w && c->h == h && c->scene.tex) return 1;
     ok &= MakeTarget(c, &c->scene, w, h, DXGI_FORMAT_R8G8B8A8_UNORM);
+    ok &= MakeTarget(c, &c->taaOut, w, h, DXGI_FORMAT_R8G8B8A8_UNORM);
+    ok &= MakeTarget(c, &c->hist[0], w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    ok &= MakeTarget(c, &c->hist[1], w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    c->histValid = 0;
     ok &= MakeTarget(c, &c->ao, w, h, DXGI_FORMAT_R8_UNORM);
     ok &= MakeTarget(c, &c->aoBlur, w, h, DXGI_FORMAT_R8_UNORM);
     for (i = 0; i < LEVELS; i++) {
@@ -360,13 +368,18 @@ static void DrawPass(PfxCore* c, ID3D11DeviceContext* x, const PfxCamera* cam, I
     cd.dst[0] = (float)dw; cd.dst[1] = (float)dh; cd.dst[2] = 1.0f / dw; cd.dst[3] = 1.0f / dh;
     cd.pass[0] = p0; cd.pass[1] = p1; cd.pass[2] = p2; cd.pass[3] = p3;
     memcpy(cd.view, cam->view, sizeof cd.view); memcpy(cd.camPos, cam->camPos, sizeof cd.camPos);
+    memcpy(cd.prevView, cam->prevView, sizeof cd.prevView); memcpy(cd.prevCam, cam->prevCam, sizeof cd.prevCam);
     memcpy(cd.fog, cam->fog, 16); memcpy(cd.sunDir, cam->sunDir, 16); memcpy(cd.sunColor, cam->sunColor, 16); memcpy(cd.amb, cam->amb, 16);
     if (SUCCEEDED(ID3D11DeviceContext_Map(x, (ID3D11Resource*)c->cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
         memcpy(m.pData, &cd, sizeof cd);
         ID3D11DeviceContext_Unmap(x, (ID3D11Resource*)c->cb, 0);
     }
 
-    ID3D11DeviceContext_OMSetRenderTargets(x, 1, &rtv, NULL);
+    if (c->rtv1) {
+        ID3D11RenderTargetView* two[2]; two[0] = rtv; two[1] = c->rtv1;
+        ID3D11DeviceContext_OMSetRenderTargets(x, 2, two, NULL);
+    } else
+        ID3D11DeviceContext_OMSetRenderTargets(x, 1, &rtv, NULL);
     vp.TopLeftX = 0; vp.TopLeftY = 0; vp.Width = (float)dw; vp.Height = (float)dh; vp.MinDepth = 0; vp.MaxDepth = 1;
     ID3D11DeviceContext_RSSetViewports(x, 1, &vp);
     ID3D11DeviceContext_PSSetShaderResources(x, 0, 8, srv);
@@ -488,7 +501,7 @@ void PfxCore_Destroy(PfxCore* c) {
     if (!c) return;
     ReleaseShaders(c);
     REL(c->sLin); REL(c->sPoint); REL(c->rs); REL(c->dss); REL(c->bs); REL(c->cb);
-    ReleaseTarget(&c->scene); ReleaseTarget(&c->ao); ReleaseTarget(&c->aoBlur); ReleaseTarget(&c->capDepth);
+    ReleaseTarget(&c->scene); ReleaseTarget(&c->ao); ReleaseTarget(&c->aoBlur); ReleaseTarget(&c->capDepth); ReleaseTarget(&c->taaOut); ReleaseTarget(&c->hist[0]); ReleaseTarget(&c->hist[1]);
     for (i = 0; i < LEVELS; i++) { ReleaseTarget(&c->lv[i]); ReleaseTarget(&c->tmp[i]); }
     REL(c->depthSrv); REL(c->depthTex); REL(c->worldSrv); REL(c->worldTex);
     if (c->hCompiler) FreeLibrary(c->hCompiler);
@@ -565,6 +578,21 @@ int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* x, ID3D11Texture2D* color, ID3D
         ID3D11DeviceContext_ResolveSubresource(x, (ID3D11Resource*)c->scene.tex, 0, (ID3D11Resource*)color, 0, DXGI_FORMAT_R8G8B8A8_UNORM);
     else
         ID3D11DeviceContext_CopyResource(x, (ID3D11Resource*)c->scene.tex, (ID3D11Resource*)color);
+
+    // 1b) temporal anti-aliasing: resolve the jittered frame against the reprojected history
+    if (cam->taa && cam->prevCam[3] > 0.5f && c->psTAA && c->taaOut.tex) {
+        int prev = c->histCur, cur = 1 - c->histCur;
+        memset(s, 0, sizeof s);
+        s[0] = c->scene.srv; s[1] = c->depthSrv; s[6] = worldSrv; s[2] = c->hist[prev].srv;
+        c->rtv1 = c->hist[cur].rtv;
+        DrawPass(c, x, cam, c->taaOut.rtv, c->w, c->h, c->psTAA, s, c->histValid ? 1.0f : 0.0f, 0, 0, 0);
+        c->rtv1 = NULL;
+        ID3D11DeviceContext_OMSetRenderTargets(x, 0, NULL, NULL);
+        ID3D11DeviceContext_CopyResource(x, (ID3D11Resource*)c->scene.tex, (ID3D11Resource*)c->taaOut.tex);
+        c->histCur = cur; c->histValid = 1;
+    } else {
+        c->histValid = 0;
+    }
 
     if (c->capture) {
         c->capture = 0;

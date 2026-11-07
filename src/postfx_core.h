@@ -22,6 +22,10 @@ typedef struct PfxCamera {
     float view[16];             // engine View matrix as laid out in the HLSL constant buffer (column major)
     float camPos[4];            // world position, w = valid flag
     float fog[4], sunDir[4], sunColor[4], amb[4];
+    // temporal anti-aliasing: previous frame's view + camera position (prevCam[3] = 1 when valid), taa = run the resolve
+    float prevView[16];
+    float prevCam[4];
+    int   taa;
 } PfxCamera;
 
 typedef struct PfxCore PfxCore;

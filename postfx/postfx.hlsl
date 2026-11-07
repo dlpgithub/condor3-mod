@@ -46,6 +46,8 @@ cbuffer CB : register(b0)
     float4 g_sunDir;   // engine sun direction (world, z up)
     float4 g_sunColor; // engine sun colour
     float4 g_amb;      // engine ambient colour
+    column_major float4x4 g_prevView;  // previous frame view (TAA)
+    float4 g_prevCam;  // previous camera position, w = 1 when valid
 };
 
 Texture2D g_t0 : register(t0);
@@ -240,6 +242,97 @@ float4 PS_Blur(VSO i) : SV_Target
     c += (g_t0.SampleLevel(g_lin, uv + step * 1.3846153846, 0).rgb + g_t0.SampleLevel(g_lin, uv - step * 1.3846153846, 0).rgb) * 0.3162162162;
     c += (g_t0.SampleLevel(g_lin, uv + step * 3.2307692308, 0).rgb + g_t0.SampleLevel(g_lin, uv - step * 3.2307692308, 0).rgb) * 0.0702702703;
     return float4(c, 1);
+}
+
+
+// ---------------------------------------------------------------- temporal anti-aliasing
+// The game renders every frame with a sub-pixel shifted viewport (Halton 2,3). Here the current frame is combined
+// with the previous result, reprojected with depth + camera motion, and clamped to the local colour range.
+#define TAA_BLEND 0.12      // weight of the new frame (lower = smoother but slower to settle)
+
+float3 TAA_History(float2 px)
+{   // Catmull-Rom, 5 bilinear taps
+    float2 pos = px;
+    float2 c = floor(pos - 0.5) + 0.5;
+    float2 f = pos - c;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 p0 = (c - 1.0) * g_screen.zw, p3 = (c + 2.0) * g_screen.zw, p12 = (c + w2 / w12) * g_screen.zw;
+    float3 r = g_t2.SampleLevel(g_lin, float2(p12.x, p0.y), 0).rgb * (w12.x * w0.y)
+             + g_t2.SampleLevel(g_lin, float2(p0.x, p12.y), 0).rgb * (w0.x * w12.y)
+             + g_t2.SampleLevel(g_lin, p12, 0).rgb * (w12.x * w12.y)
+             + g_t2.SampleLevel(g_lin, float2(p3.x, p12.y), 0).rgb * (w3.x * w12.y)
+             + g_t2.SampleLevel(g_lin, float2(p12.x, p3.y), 0).rgb * (w12.x * w3.y);
+    float wsum = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+    return max(r / wsum, 0.0);
+}
+
+struct TAAO { float4 c : SV_Target0; float4 h : SV_Target1; };
+
+TAAO PS_TAA(VSO i)
+{
+    int2 p = int2(i.pos.xy);
+    float3 cur = Scene(p);
+    TAAO o;
+
+    float dc, dw;
+#if DEPTH_MS
+    dc = g_depth.Load(p, 0).x; dw = g_world.Load(p, 0).x;
+#else
+    dc = g_depth.Load(int3(p, 0)).x; dw = g_world.Load(int3(p, 0)).x;
+#endif
+    float d = max(dc, dw);
+    bool cockpit = (dc > dw) && !IsSky(dc);       // the engine clears depth again before the cockpit: it moves with the camera
+
+    float2 px = i.pos.xy;
+    bool ok = (g_pass.x > 0.5) && (g_prevCam.w > 0.5);
+    if (!cockpit)
+    {
+        float3 pv;
+        float2 ndc = float2((p.x + 0.5) * g_screen.z * 2.0 - 1.0, 1.0 - (p.y + 0.5) * g_screen.w * 2.0);
+        float3x3 R = (float3x3)g_view;
+        float3x3 Rp = (float3x3)g_prevView;
+        if (IsSky(d))
+        {
+            float3 wd = mul(float3(ndc.x / g_proj.x, ndc.y / g_proj.y, 1.0), transpose(R));
+            pv = mul(wd, Rp);
+        }
+        else
+        {
+            float3 wp = mul(ViewPos(p, ViewZ(d)), transpose(R));
+            pv = mul(wp + g_camPos.xyz - g_prevCam.xyz, Rp);
+        }
+        ok = ok && (pv.z > 0.01);
+        float2 n2 = float2(pv.x / max(pv.z, 0.01) * g_proj.x, pv.y / max(pv.z, 0.01) * g_proj.y);
+        px = float2(n2.x * 0.5 + 0.5, 0.5 - n2.y * 0.5) * g_screen.xy;
+        ok = ok && all(px > 1.0) && all(px < g_screen.xy - 1.0);
+    }
+
+    float3 res = cur;
+    if (ok)
+    {
+        float3 m1 = 0, m2 = 0, mn = 1e9, mx = -1e9;
+        [unroll] for (int y = -1; y <= 1; y++)
+        [unroll] for (int x = -1; x <= 1; x++)
+        {
+            float3 s = Scene(p + int2(x, y));
+            m1 += s; m2 += s * s; mn = min(mn, s); mx = max(mx, s);
+        }
+        m1 /= 9.0; m2 /= 9.0;
+        float3 sd = sqrt(max(m2 - m1 * m1, 0.0));
+        float3 lo = max(mn, m1 - 1.25 * sd), hi = min(mx, m1 + 1.25 * sd);
+        float3 h = TAA_History(px);
+        float3 hc = clamp(h, lo, hi);
+        float dist = length(h - hc);
+        float k = saturate(TAA_BLEND + dist * 2.0);
+        res = lerp(hc, cur, k);
+    }
+    o.c = float4(res, 1);
+    o.h = float4(res, 1);
+    return o;
 }
 
 // ---------------------------------------------------------------- final composite
