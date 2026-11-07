@@ -10,9 +10,9 @@
 // ---------------------------------------------------------------- tweakables
 #define EXPOSURE         1.00    // linear brightness multiplier (1 = unchanged)
 #define SHOULDER         0.72    // highlights above this brightness are compressed softly instead of clipping
-#define CONTRAST         0.30    // 0 = off. S-curve in display space: deeper shadows, brighter lights
-#define SATURATION       1.04    // 1 = unchanged
-#define BLOOM_STRENGTH   0.16    // glow around bright areas (sun, clouds, water glints)
+#define CONTRAST         0.45    // 0 = off. S-curve in display space: deeper shadows, brighter lights
+#define SATURATION       1.12    // 1 = unchanged
+#define BLOOM_STRENGTH   0.22    // glow around bright areas (sun, clouds, water glints)
 #define BLOOM_THRESHOLD  0.55    // linear brightness where glow starts
 #define AO_STRENGTH      1.80    // 0 = off. Darkens creases, tree bases, building edges
 #define AO_RADIUS        8.0     // metres
@@ -20,8 +20,8 @@
 #define AO_FADE_FAR      6000.0  //         ... and is gone here
 #define SHARPEN          0.50    // local contrast / detail (0 = off)
 #define VIGNETTE         0.18
-#define HAZE_STRENGTH    0.60    // extra blue depth separation of far terrain
-#define HAZE_DISTANCE    14000.0 // metres
+#define HAZE_STRENGTH    0.90    // extra blue depth separation of far terrain
+#define HAZE_DISTANCE    9000.0 // metres
 #define SKY_SATURATION   1.18    // sky only: deeper blue
 #define SKY_DARKEN       0.93    // sky only: slight darkening, richer blue
 #define HAZE_COLOR       float3(0.40, 0.56, 0.80)  // linear colour distant terrain fades into (horizon blue)
