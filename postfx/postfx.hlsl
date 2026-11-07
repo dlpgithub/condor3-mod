@@ -24,7 +24,7 @@
 #define HAZE_DISTANCE    9000.0 // metres (fallback when no engine data)
 #define HAZE_DENSITY     7.0e-5  // extinction per metre at sea level (physical-ish haze)
 #define HAZE_HEIGHT      2500.0  // metres: scale height of the haze (denser in valleys)
-#define AUTO_EXPOSURE    0.7     // eye adaptation: brightens low-sun scenes (0 = off), uses the engine sun elevation
+#define AUTO_EXPOSURE    0.30    // eye adaptation: brightens low-sun scenes (0 = off), uses the engine sun elevation
 #define HAZE_INSCATTER   1.0     // strength of the scattered light added
 #define SKY_SATURATION   1.18    // sky only: deeper blue
 #define SKY_DARKEN       0.93    // sky only: slight darkening, richer blue
@@ -131,11 +131,12 @@ float3 Atmosphere(float3 lin, int2 p, float z)
     float3 wdir = mul(vp / dist, transpose((float3x3)g_view));
     float k = dist * wdir.z / HAZE_HEIGHT;
     float path = (abs(k) < 1e-3) ? dist : dist * (1.0 - exp(-k)) / k;      // integral of exp(-dz*s/H) ds
-    float tau = HAZE_DENSITY * exp(-g_camPos.z / HAZE_HEIGHT) * path;
+    float lowSun = smoothstep(0.05, 0.5, g_sunDir.z);                        // low sun: thinner, less glaring haze
+    float tau = HAZE_DENSITY * lerp(0.55, 1.0, lowSun) * exp(-g_camPos.z / HAZE_HEIGHT) * path;
     float3 trans = exp(-tau * float3(0.80, 1.00, 1.30));                    // blue is scattered out of the light path first
     float3 look = normalize(float3(wdir.xy, max(wdir.z, 0.0) * 0.35));      // sky colour near the horizon in that direction
     float3 hazeCol = pow(saturate(EngineSky(look, g_fog.rgb, g_sunColor.rgb, g_sunDir.xyz)), 2.2);
-    return lin * trans + hazeCol * (1.0 - trans) * HAZE_INSCATTER;
+    return lin * trans + hazeCol * (1.0 - trans) * HAZE_INSCATTER * lerp(0.6, 1.0, lowSun);
 }
 
 // ---------------------------------------------------------------- diagnostics helper
@@ -295,7 +296,7 @@ float4 PS_Final(VSO i) : SV_Target
                  + g_t4.SampleLevel(g_lin, uv, 0).rgb * 0.20;
     lin += bloom * BLOOM_STRENGTH;
     float expo = EXPOSURE;
-    if (g_camPos.w > 0.5) expo *= 1.0 + AUTO_EXPOSURE * (1.0 - smoothstep(0.05, 0.65, g_sunDir.z));
+    if (g_camPos.w > 0.5 && !IsSky(d)) expo *= 1.0 + AUTO_EXPOSURE * (1.0 - smoothstep(0.05, 0.65, g_sunDir.z));   // ground only: the sky is already bright
     lin *= expo;
 
     // soft highlight shoulder on luminance: keeps hue and saturation, no hard clipping
