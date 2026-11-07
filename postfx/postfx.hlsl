@@ -22,7 +22,7 @@
 #define VIGNETTE         0.18
 #define HAZE_STRENGTH    0.90    // extra blue depth separation of far terrain
 #define HAZE_DISTANCE    9000.0 // metres (fallback when no engine data)
-#define HAZE_DENSITY     7.0e-5  // extinction per metre at sea level (physical-ish haze)
+#define HAZE_DENSITY     5.0e-5  // extinction per metre at sea level (physical-ish haze)
 #define HAZE_HEIGHT      2500.0  // metres: scale height of the haze (denser in valleys)
 #define AUTO_EXPOSURE    0.30    // eye adaptation: brightens low-sun scenes (0 = off), uses the engine sun elevation
 #define HAZE_INSCATTER   1.0     // strength of the scattered light added
@@ -132,7 +132,8 @@ float3 Atmosphere(float3 lin, int2 p, float z)
     float k = dist * wdir.z / HAZE_HEIGHT;
     float path = (abs(k) < 1e-3) ? dist : dist * (1.0 - exp(-k)) / k;      // integral of exp(-dz*s/H) ds
     float lowSun = smoothstep(0.05, 0.5, g_sunDir.z);                        // low sun: thinner, less glaring haze
-    float tau = HAZE_DENSITY * lerp(0.55, 1.0, lowSun) * exp(-g_camPos.z / HAZE_HEIGHT) * path;
+    float altFade = lerp(1.0, 0.45, smoothstep(1000.0, 2800.0, g_camPos.z));   // high up (cloud level) the air looks much clearer
+    float tau = HAZE_DENSITY * lerp(0.55, 1.0, lowSun) * altFade * exp(-g_camPos.z / HAZE_HEIGHT) * path;
     float3 trans = exp(-tau * float3(0.80, 1.00, 1.30));                    // blue is scattered out of the light path first
     float3 look = normalize(float3(wdir.xy, max(wdir.z, 0.0) * 0.35));      // sky colour near the horizon in that direction
     float3 hazeCol = pow(saturate(EngineSky(look, g_fog.rgb, g_sunColor.rgb, g_sunDir.xyz)), 2.2);
