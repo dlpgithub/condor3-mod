@@ -1,0 +1,25 @@
+{
+    "name": "C3P Dev (MinGW)",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "args": {}
+    },
+    "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+    },
+    "remoteUser": "vscode",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools",
+                "ms-vscode.cmake-tools",
+                "twxs.cmake"
+            ],
+            "settings": {
+                "cmake.configureOnOpen": true,
+                "cmake.generator": "Unix Makefiles"
+            }
+        }
+    },
+    "postCreateCommand": "git submodule update --init --recursive || echo '⚠️  git submodule Update fehlgeschlagen - bitte manuell ausführen: git submodule update --init --recursive'"
+}

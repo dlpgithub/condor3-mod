@@ -1,0 +1,4 @@
+[submodule "external/dobby-fork"]
+	path = external/dobby-fork
+	url = https://github.com/trueToastedCode/dobby-fork.git
+	branch = windows
