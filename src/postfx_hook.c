@@ -97,6 +97,53 @@ static void STDMETHODCALLTYPE ClearDsvHook(ID3D11DeviceContext* self, ID3D11Dept
     g_origClear(self, dsv, flags, d, st);
 }
 
+
+// ---- engine atmosphere constants -----------------------------------------------------------------------------
+// The engine uploads the terrain effect's per-frame constant buffer (416 bytes) with UpdateSubresource every frame.
+// Layout (cbChangesEveryFrame of EffectLand): View 0, Projection 64, 3x ViewProjLight 128..320, CameraPos 320,
+// FogColor 336, SunPos 352, SunColor 368, AmbientColor 384, Time 400. We copy the interesting parts.
+typedef struct { float view[16]; float camPos[3]; float fog[4]; float sun[3]; float sunColor[4]; float amb[4]; unsigned frame; int valid; } AtmoData;
+static AtmoData g_atmo;
+static unsigned g_updSize[24], g_updCount[24]; static int g_updN = 0;
+typedef void (STDMETHODCALLTYPE *UpdSubFn)(ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT);
+static UpdSubFn g_origUpd = NULL;
+static void STDMETHODCALLTYPE UpdSubHook(ID3D11DeviceContext* self, ID3D11Resource* res, UINT sub, const D3D11_BOX* box, const void* src, UINT rp, UINT dp) {
+    if (res && src && !box) {
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        ID3D11Resource_GetType(res, &dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+            D3D11_BUFFER_DESC bd; int i;
+            ID3D11Buffer_GetDesc((ID3D11Buffer*)res, &bd);
+            if (bd.BindFlags & D3D11_BIND_CONSTANT_BUFFER) {
+                for (i = 0; i < g_updN && g_updSize[i] != bd.ByteWidth; i++) {}
+                if (i == g_updN && g_updN < 24) { g_updSize[g_updN] = bd.ByteWidth; g_updCount[g_updN] = 0; g_updN++; }
+                if (i < 24) g_updCount[i]++;
+                if (bd.ByteWidth == 416) {
+                    const float* f = (const float*)src;
+                    float l = sqrtf(f[88] * f[88] + f[89] * f[89] + f[90] * f[90]);
+                    if (fabsf(l - 1.0f) < 0.02f) {
+                        memcpy(g_atmo.view, f, 64); memcpy(g_atmo.camPos, f + 80, 12); memcpy(g_atmo.fog, f + 84, 16);
+                        memcpy(g_atmo.sun, f + 88, 12); memcpy(g_atmo.sunColor, f + 92, 16); memcpy(g_atmo.amb, f + 96, 16);
+                        g_atmo.frame = g_frames; g_atmo.valid = 1;
+                    }
+                }
+            }
+        }
+    }
+    g_origUpd(self, res, sub, box, src, rp, dp);
+}
+static int g_updHooked = 0;
+static void HookUpd(ID3D11DeviceContext* ctx) {
+    void** vt; DWORD old;
+    if (g_updHooked || !ctx) return;
+    g_updHooked = 1;
+    vt = *(void***)ctx;
+    if (!VirtualProtect(&vt[48], sizeof(void*), PAGE_READWRITE, &old)) return;
+    g_origUpd = (UpdSubFn)vt[48];
+    vt[48] = (void*)UpdSubHook;
+    VirtualProtect(&vt[48], sizeof(void*), old, &old);
+}
+
 static int g_clearHooked = 0;
 static void HookClear(ID3D11DeviceContext* ctx) {
     void** vt; DWORD old;
@@ -170,8 +217,17 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
     if (!color || !depth || !rtv) return;
     g_mainDepth = (ID3D11Texture2D*)(uintptr_t)depth;
     HookClear((ID3D11DeviceContext*)(uintptr_t)ctx);
+    HookUpd((ID3D11DeviceContext*)(uintptr_t)ctx);
     if (!ReadProjection(&cam)) { Diag("postfx: projection rejected"); return; }
     cam.time = (float)(GetTickCount() % 3600000u) / 1000.0f;
+    memset(cam.view, 0, sizeof cam.view);
+    cam.camPos[0] = cam.camPos[1] = cam.camPos[2] = cam.camPos[3] = 0;
+    if (g_atmo.valid && g_frames - g_atmo.frame < 10) {
+        memcpy(cam.view, g_atmo.view, sizeof cam.view);
+        memcpy(cam.camPos, g_atmo.camPos, 12); cam.camPos[3] = 1.0f;
+        memcpy(cam.fog, g_atmo.fog, 16); memcpy(cam.sunDir, g_atmo.sun, 12); cam.sunDir[3] = 0;
+        memcpy(cam.sunColor, g_atmo.sunColor, 16); memcpy(cam.amb, g_atmo.amb, 16);
+    }
 
     if (!g_core) {
         char hlsl[MAX_PATH];
@@ -489,6 +545,14 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
             RLog("cmd: %s", lines[i]);
             if (!_stricmp(c, "windows")) { g_main = NULL; EnumWindows(EnumW, 1); }
             else if (!_stricmp(c, "click")) { sscanf(lines[i], "%*s %d %d", &x, &y); DoClick(x, y); }
+            else if (!_stricmp(c, "atmo")) {
+                int q;
+                RLog("atmo: valid=%d frame=%u (now %u)", g_atmo.valid, g_atmo.frame, g_frames);
+                for (q = 0; q < g_updN; q++) RLog("  cbuffer size %u: %u updates", g_updSize[q], g_updCount[q]);
+                RLog("  view row0 %.4f %.4f %.4f %.4f", g_atmo.view[0], g_atmo.view[1], g_atmo.view[2], g_atmo.view[3]);
+                RLog("  camPos %.1f %.1f %.1f  fog %.3f %.3f %.3f %.3f", g_atmo.camPos[0], g_atmo.camPos[1], g_atmo.camPos[2], g_atmo.fog[0], g_atmo.fog[1], g_atmo.fog[2], g_atmo.fog[3]);
+                RLog("  sunDir %.4f %.4f %.4f  sunCol %.3f %.3f %.3f %.3f  amb %.3f %.3f %.3f %.3f", g_atmo.sun[0], g_atmo.sun[1], g_atmo.sun[2], g_atmo.sunColor[0], g_atmo.sunColor[1], g_atmo.sunColor[2], g_atmo.sunColor[3], g_atmo.amb[0], g_atmo.amb[1], g_atmo.amb[2], g_atmo.amb[3]);
+            }
             else if (!_stricmp(c, "state")) LogState();
             else if (!_stricmp(c, "cam")) {     // cam off | here | X Y Z YAW PITCH
                 float v[5] = {0}; int nn;

@@ -36,6 +36,9 @@ typedef struct {
     float misc[4];     // time, frame, 0, 0
     float dst[4];      // destination width, height, 1/w, 1/h
     float pass[4];     // pass specific (blur direction in texels etc.)
+    float view[16];    // engine view matrix (column major, as in the engine's own constant buffer)
+    float camPos[4];   // world camera position, w = atmosphere data valid
+    float fog[4], sunDir[4], sunColor[4], amb[4];
 } CBData;
 
 typedef struct { ID3D11Texture2D* tex; ID3D11ShaderResourceView* srv; ID3D11RenderTargetView* rtv; UINT w, h; } Target;
@@ -356,6 +359,8 @@ static void DrawPass(PfxCore* c, ID3D11DeviceContext* x, const PfxCamera* cam, I
     cd.misc[0] = cam->time; cd.misc[1] = (float)c->frame; cd.misc[2] = 0; cd.misc[3] = 0;
     cd.dst[0] = (float)dw; cd.dst[1] = (float)dh; cd.dst[2] = 1.0f / dw; cd.dst[3] = 1.0f / dh;
     cd.pass[0] = p0; cd.pass[1] = p1; cd.pass[2] = p2; cd.pass[3] = p3;
+    memcpy(cd.view, cam->view, sizeof cd.view); memcpy(cd.camPos, cam->camPos, sizeof cd.camPos);
+    memcpy(cd.fog, cam->fog, 16); memcpy(cd.sunDir, cam->sunDir, 16); memcpy(cd.sunColor, cam->sunColor, 16); memcpy(cd.amb, cam->amb, 16);
     if (SUCCEEDED(ID3D11DeviceContext_Map(x, (ID3D11Resource*)c->cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
         memcpy(m.pData, &cd, sizeof cd);
         ID3D11DeviceContext_Unmap(x, (ID3D11Resource*)c->cb, 0);

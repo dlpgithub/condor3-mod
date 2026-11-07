@@ -21,7 +21,10 @@
 #define SHARPEN          0.50    // local contrast / detail (0 = off)
 #define VIGNETTE         0.18
 #define HAZE_STRENGTH    0.90    // extra blue depth separation of far terrain
-#define HAZE_DISTANCE    9000.0 // metres
+#define HAZE_DISTANCE    9000.0 // metres (fallback when no engine data)
+#define HAZE_DENSITY     7.0e-5  // extinction per metre at sea level (physical-ish haze)
+#define HAZE_HEIGHT      2500.0  // metres: scale height of the haze (denser in valleys)
+#define HAZE_INSCATTER   1.0     // strength of the scattered light added
 #define SKY_SATURATION   1.18    // sky only: deeper blue
 #define SKY_DARKEN       0.93    // sky only: slight darkening, richer blue
 #define HAZE_COLOR       float3(0.40, 0.56, 0.80)  // linear colour distant terrain fades into (horizon blue)
@@ -36,6 +39,12 @@ cbuffer CB : register(b0)
     float4 g_misc;     // time, frame
     float4 g_dst;      // width, height, 1/w, 1/h of the render target of the current pass
     float4 g_pass;     // pass specific
+    column_major float4x4 g_view;   // engine view matrix
+    float4 g_camPos;   // world camera position, w = 1 when the engine atmosphere data is valid
+    float4 g_fog;      // engine fog colour
+    float4 g_sunDir;   // engine sun direction (world, z up)
+    float4 g_sunColor; // engine sun colour
+    float4 g_amb;      // engine ambient colour
 };
 
 Texture2D g_t0 : register(t0);
@@ -97,6 +106,35 @@ float3 Scene(int2 p)
 float IGN(float2 p, float offset)
 {
     return frac(52.9829189 * frac(dot(p + offset, float2(0.06711056, 0.00583715))));
+}
+
+
+// The engine's own sky colour formula (EffectSky/EffectLand vertex shader), evaluated per direction.
+// Haze fades to exactly this colour, so distant terrain meets the sky without a seam, including the glow towards the sun.
+float3 EngineSky(float3 look, float3 fogColor, float3 sunColor, float3 sunPos)
+{
+    float h = max(look.z, 0);
+    float3 baseColor = float3(fogColor.x / (4.0 * h + 1.0), fogColor.y / (1.8 * h + 1.0), fogColor.z / (0.5 * h + 1.0));
+    float ang  = acos(clamp(dot(sunPos, look), -1.0, 1.0));
+    float angZ = max(look.z - sunPos.z, 0);
+    float f = exp(-2.0 * (0.1 + 0.9 * ang) * (0.5 + 0.5 * sunPos.z) - angZ * (1.0 - sqrt(max(sunPos.z, 0))));
+    return baseColor + f * (sunColor - baseColor);
+}
+
+// Height-dependent aerial perspective: optical depth along the ray with an exponentially decaying density
+// (valleys are hazier than the air at altitude), wavelength dependent extinction, in-scatter in the engine's sky colour.
+float3 Atmosphere(float3 lin, int2 p, float z)
+{
+    float3 vp = ViewPos(p, z);
+    float dist = length(vp);
+    float3 wdir = mul(vp / dist, transpose((float3x3)g_view));
+    float k = dist * wdir.z / HAZE_HEIGHT;
+    float path = (abs(k) < 1e-3) ? dist : dist * (1.0 - exp(-k)) / k;      // integral of exp(-dz*s/H) ds
+    float tau = HAZE_DENSITY * exp(-g_camPos.z / HAZE_HEIGHT) * path;
+    float3 trans = exp(-tau * float3(0.80, 1.00, 1.30));                    // blue is scattered out of the light path first
+    float3 look = normalize(float3(wdir.xy, max(wdir.z, 0.0) * 0.35));      // sky colour near the horizon in that direction
+    float3 hazeCol = pow(saturate(EngineSky(look, g_fog.rgb, g_sunColor.rgb, g_sunDir.xyz)), 2.2);
+    return lin * trans + hazeCol * (1.0 - trans) * HAZE_INSCATTER;
 }
 
 // ---------------------------------------------------------------- diagnostics helper
@@ -232,11 +270,18 @@ float4 PS_Final(VSO i) : SV_Target
         float fade = 1.0 - saturate((z - AO_FADE_NEAR) / (AO_FADE_FAR - AO_FADE_NEAR));
         lin *= lerp(1.0, ao, AO_STRENGTH * fade);
 
-        // aerial perspective: distant terrain loses contrast/saturation and fades towards the horizon blue
-        float t = saturate((1.0 - exp(-z / HAZE_DISTANCE)) * HAZE_STRENGTH * 1.0);
-        float lz = dot(lin, LUMA);
-        float3 faded = lerp(float3(lz, lz, lz), lin, 1.0 - 0.45 * t);
-        lin = lerp(faded, HAZE_COLOR * (0.55 + 0.9 * lz), t * 0.75);
+        if (g_camPos.w > 0.5)
+        {
+            lin = Atmosphere(lin, p, z);
+        }
+        else
+        {
+            // aerial perspective fallback (no engine data): fade towards a fixed horizon blue
+            float t = saturate((1.0 - exp(-z / HAZE_DISTANCE)) * HAZE_STRENGTH * 1.0);
+            float lz = dot(lin, LUMA);
+            float3 faded = lerp(float3(lz, lz, lz), lin, 1.0 - 0.45 * t);
+            lin = lerp(faded, HAZE_COLOR * (0.55 + 0.9 * lz), t * 0.75);
+        }
     }
     else
     {

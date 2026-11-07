@@ -40,6 +40,7 @@ int main(int argc, char** argv) {
     HRESULT (WINAPI *pCompile)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, void*, LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
     D3D11_VIEWPORT vp;
     PfxCamera cam;
+    memset(&cam, 0, sizeof cam);
     PfxCore* core;
     D3D11_MAPPED_SUBRESOURCE m;
     FILE* lg;
