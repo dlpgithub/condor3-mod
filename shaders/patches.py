@@ -64,6 +64,12 @@ def patch_land(src, o):
                "\t  TextureColor.rgb += ModWater * MOD_WATER_GLINT * lerp(float3(1, 1, 1), SunColor.rgb, 0.6) * pow(saturate(dot(Rs, V)), 160);")
         src = rep(src, old, new, what="Land: water glint")
 
+    # [MOD] stronger shadows + warm sun / cool ambient
+    src = rep(src, "float TotalShadow = 0.6 + 0.4 * min(min(min(CloudShadow, shadowFactor), shadowFactorAvion), shadowFactorTowplane);",
+              "float TotalShadow = (1.0 - MOD_SHADOW) + MOD_SHADOW * min(min(min(CloudShadow, shadowFactor), shadowFactorAvion), shadowFactorTowplane);", what="Land: shadow")
+    src = rep(src, "float4 LightingColor = saturate(SunColor * sundot + AmbientColor);",
+              "float4 LightingColor = saturate(ModSun(SunColor) * sundot + ModAmb(AmbientColor));", what="Land: light tint")
+
     old = "return lerp(input.SkyColor, saturate(LightingColor * TotalShadow * TextureColor), input.fogFactor);"
     if o["per_pixel_atmosphere"]:
         new = (
@@ -105,6 +111,9 @@ def patch_sky(src, o):
 # Trees / forests
 # --------------------------------------------------------------------------
 def patch_autoobjects(src, o):
+    src = rep(src, "float TotalShadow = 0.6 + 0.4 * min(CloudShadow, shadowFactor);",
+              "float TotalShadow = (1.0 - MOD_SHADOW) + MOD_SHADOW * min(CloudShadow, shadowFactor);", what="AutoObjects: shadow")
+    src = rep(src, "saturate(SunExposure * SunColor * TexColor", "saturate(SunExposure * ModSun(SunColor) * TexColor", what="AutoObjects: tint")
     if o["unify_tree_haze"]:
         # Trees used a different haze formula than terrain and sky, so distant
         # forests faded to a slightly different colour than the ground behind.
@@ -123,6 +132,10 @@ def patch_autoobjects(src, o):
 # Grass
 # --------------------------------------------------------------------------
 def patch_grass(src, o):
+    src = rep(src, "float TotalShadow = 0.6 + 0.4 * min(input.CloudShadow, shadowFactor);",
+              "float TotalShadow = (1.0 - MOD_SHADOW) + MOD_SHADOW * min(input.CloudShadow, shadowFactor);", what="Grass: shadow")
+    src = rep(src, "float4 LightingColor = saturate(SunColor * sundot + AmbientColor);",
+              "float4 LightingColor = saturate(ModSun(SunColor) * sundot + ModAmb(AmbientColor));", what="Grass: light tint")
     return rep(src, "return OutputColor;", "return ModGradeA(OutputColor);", what="Grass: grade")
 
 

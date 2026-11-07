@@ -6,6 +6,13 @@
 #define MOD_DITHER       @dither@
 #define MOD_MACRO_DETAIL @macro_detail@
 #define MOD_WATER_GLINT  @water_glint@
+#define MOD_SHADOW       @shadow_strength@
+#define MOD_WARM         @warm_sun@
+#define MOD_COOL         @cool_ambient@
+
+// Warm direct sunlight / cool sky-lit shadows (the original lights everything with one neutral tint).
+float4 ModSun(float4 sun) { return float4(sun.rgb * float3(1.0 + MOD_WARM, 1.0, 1.0 - MOD_WARM * 1.4), sun.a); }
+float4 ModAmb(float4 amb) { return float4(amb.rgb * float3(1.0 - MOD_COOL, 1.0, 1.0 + MOD_COOL * 1.6), amb.a); }
 
 // Gentle colour grade: saturation + a soft S-curve for contrast.
 // Applied to everything that ends up on screen *together* (terrain, sky,

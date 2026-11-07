@@ -75,6 +75,9 @@ def common_block(o):
         "curve": "%.4f" % o["grade_contrast"],
         "dither": "%.4f" % o["dither"],
         "macro_detail": "%.4f" % o["macro_detail"],
+        "shadow_strength": "%.4f" % o["shadow_strength"],
+        "warm_sun": "%.4f" % o["warm_sun"],
+        "cool_ambient": "%.4f" % o["cool_ambient"],
         "water_glint": "%.4f" % o["water_glint"],
     }
     for k, v in vals.items():

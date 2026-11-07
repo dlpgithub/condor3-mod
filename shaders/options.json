@@ -9,9 +9,13 @@
   "unify_tree_haze": true,
 
   "dither": 1.0,
-  "grade_saturation": 1.08,
-  "grade_contrast": 0.25,
+  "grade_saturation": 1.0,
+  "grade_contrast": 0.0,
 
   "macro_detail": 0.35,
-  "water_glint": 0.8
+  "water_glint": 0.8,
+
+  "shadow_strength": 0.62,
+  "warm_sun": 0.10,
+  "cool_ambient": 0.08
 }
