@@ -44,6 +44,7 @@
 #define CAM_OFF_PROJ      0x188
 
 static PfxCore* g_core = NULL;
+static char     g_shot[MAX_PATH];     // pending 'shot' request (capture path), consumed by the frame hook
 static int      g_enabled = 1;
 static int      g_dead = 0;           // gave up (fatal problem)
 static int      g_fails = 0;
@@ -179,6 +180,7 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
         if (!g_core) { g_dead = 1; return; }
     }
     if (e8) PfxCore_RequestReload(g_core);
+    if (g_shot[0]) { PfxCore_RequestCapture(g_core, g_shot); g_shot[0] = 0; }
     if (e10 || g_frames == 600) {      // F10, or automatically once ~10 s after start (diagnostics)
         char path[MAX_PATH];
         _snprintf(path, sizeof path, "%s\\capture.bin", g_dir);
@@ -195,6 +197,131 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
         if (g_logf) { fprintf(g_logf, "postfx: giving up after repeated failures\n"); fflush(g_logf); }
     }
     g_worldValid = 0; g_clearsThisFrame = 0; g_copiesThisFrame = 0;
+}
+
+
+// ---- remote control (for automated testing) ---------------------------------------------------------------
+// A thread inside the game polls <exedir>\postfx\cmd.txt once per 200 ms. Every line is a command, the file is
+// deleted after it was read, results go to postfx.log. Clicks/keys are posted as window messages to the game
+// window, so no macOS accessibility permission is needed.
+//   windows                 list the game's windows (handle, title, client size, screen position)
+//   click X Y               left click at client coordinates (of the main window)
+//   key NAME|0xVK [n]       key press (NAME: enter esc space tab up down left right f1..f12 a..z 0..9), n times
+//   keydown/keyup NAME      hold / release (e.g. for camera or controls)
+//   post on|off             post-processing on/off
+//   wait MS                 pause the script
+#include <ctype.h>
+static HWND g_main = NULL;
+#define ADDR_STATUS_TEXT 0x007D96A4      // Delphi AnsiString: current loading/status message of the game
+static volatile int g_wantOff = 0;
+static void RLog(const char* fmt, ...) {
+    va_list ap;
+    if (!g_logf) return;
+    va_start(ap, fmt); vfprintf(g_logf, fmt, ap); va_end(ap);
+    fputc('\n', g_logf); fflush(g_logf);
+}
+static BOOL CALLBACK EnumW(HWND h, LPARAM lp) {
+    DWORD pid; char t[128]; RECT r; POINT o = {0, 0};
+    GetWindowThreadProcessId(h, &pid);
+    if (pid != GetCurrentProcessId() || !IsWindowVisible(h)) return TRUE;
+    GetWindowTextA(h, t, sizeof t);
+    GetClientRect(h, &r); ClientToScreen(h, &o);
+    if (lp) RLog("window %p '%s' client %ldx%ld at screen %ld,%ld", (void*)h, t, r.right, r.bottom, o.x, o.y);
+    if (strncmp(t, "Condor", 6) == 0 && r.right > 200) g_main = h;   // the big game/menu window
+    return TRUE;
+}
+static int KeyVk(const char* n) {
+    static const struct { const char* n; int vk; } t[] = {
+        {"enter",VK_RETURN},{"esc",VK_ESCAPE},{"space",VK_SPACE},{"tab",VK_TAB},{"up",VK_UP},{"down",VK_DOWN},
+        {"left",VK_LEFT},{"right",VK_RIGHT},{"pgup",VK_PRIOR},{"pgdn",VK_NEXT},{"home",VK_HOME},{"end",VK_END},
+        {"pause",VK_PAUSE},{"back",VK_BACK},{"plus",VK_ADD},{"minus",VK_SUBTRACT}};
+    unsigned i;
+    if (n[0] == '0' && (n[1] == 'x' || n[1] == 'X')) return (int)strtol(n, NULL, 16);
+    for (i = 0; i < sizeof t / sizeof t[0]; i++) if (!_stricmp(n, t[i].n)) return t[i].vk;
+    if ((n[0] == 'f' || n[0] == 'F') && isdigit((unsigned char)n[1])) return VK_F1 + atoi(n + 1) - 1;
+    if (n[1] == 0) return toupper((unsigned char)n[0]);
+    return 0;
+}
+static void KeyMsg(int vk, int down) {
+    UINT sc = MapVirtualKeyA(vk, 0);
+    LPARAM lp = 1 | (sc << 16) | (down ? 0 : (3u << 30));
+    HWND h = GetForegroundWindow(); DWORD pid = 0;
+    if (h) GetWindowThreadProcessId(h, &pid);
+    if (pid != GetCurrentProcessId()) h = g_main;
+    PostMessageA(h, down ? WM_KEYDOWN : WM_KEYUP, (WPARAM)vk, lp);
+}
+static void DoClick(int x, int y) {
+    HWND h = g_main, c;
+    POINT p; LPARAM lp;
+    if (!h) return;
+    // deepest child window at that point
+    p.x = x; p.y = y;
+    for (;;) {
+        c = ChildWindowFromPointEx(h, p, CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT);
+        if (!c || c == h) break;
+        MapWindowPoints(h, c, &p, 1);
+        h = c;
+    }
+    lp = MAKELPARAM(p.x, p.y);
+    PostMessageA(h, WM_MOUSEMOVE, 0, lp);
+    PostMessageA(h, WM_LBUTTONDOWN, MK_LBUTTON, lp);
+    Sleep(60);
+    PostMessageA(h, WM_LBUTTONUP, 0, lp);
+    RLog("clicked %d,%d on window %p", x, y, (void*)h);
+}
+static void LogState(void) {
+    uint32_t sp = 0, len = 0; char txt[128] = "";
+    static unsigned lastFrames = 0; unsigned f = g_frames;
+    if (Rd32((uintptr_t)IdaAddrToRuntime(ADDR_STATUS_TEXT), &sp) && sp && Rd32(sp - 4, &len) && len < 100 && !IsBadReadPtr((void*)(uintptr_t)sp, len + 1)) {
+        memcpy(txt, (void*)(uintptr_t)sp, len); txt[len] = 0;
+    }
+    Sleep(500);   // is the frame hook still running?  (flight / rendering active)
+    RLog("state: status='%s' flying=%d frames=%u postfx=%s core=%s", txt, g_frames != f, g_frames, g_enabled ? "on" : "off", g_core ? "ready" : "none");
+    (void)lastFrames;
+    g_main = NULL; EnumWindows(EnumW, 1);
+}
+static void DoMouseClick(int x, int y) {   // real (injected) input at client coordinates of the main window
+    POINT o = {0, 0};
+    if (!g_main) { RLog("mclick: no main window"); return; }
+    ClientToScreen(g_main, &o);
+    SetCursorPos(o.x + x, o.y + y);
+    Sleep(80);
+    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+    Sleep(80);
+    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+    RLog("mouse click at screen %ld,%ld", o.x + x, o.y + y);
+}
+static DWORD WINAPI RemoteThread(LPVOID unused) {
+    char path[MAX_PATH], line[256];
+    (void)unused;
+    _snprintf(path, sizeof path, "%s\\cmd.txt", g_dir);
+    for (;;) {
+        FILE* f; char* lines[64]; int n = 0, i;
+        Sleep(200);
+        f = fopen(path, "r");
+        if (!f) continue;
+        while (n < 64 && fgets(line, sizeof line, f)) { lines[n] = _strdup(line); n++; }
+        fclose(f);
+        DeleteFileA(path);
+        g_main = NULL; EnumWindows(EnumW, 0);
+        for (i = 0; i < n; i++) {
+            char c[32] = {0}, a[64] = {0}; int x = 0, y = 0, cnt = 1, k;
+            sscanf(lines[i], "%31s %63s %d", c, a, &cnt);
+            RLog("cmd: %s", lines[i]);
+            if (!_stricmp(c, "windows")) { g_main = NULL; EnumWindows(EnumW, 1); }
+            else if (!_stricmp(c, "click")) { sscanf(lines[i], "%*s %d %d", &x, &y); DoClick(x, y); }
+            else if (!_stricmp(c, "state")) LogState();
+            else if (!_stricmp(c, "shot")) { CreateDirectoryA(g_dir, NULL); { char d2[MAX_PATH]; _snprintf(d2, sizeof d2, "%s\\shots", g_dir); CreateDirectoryA(d2, NULL); _snprintf(g_shot, sizeof g_shot, "%s\\%s.bin", d2, a); } RLog("shot requested: %s", g_shot); }
+            else if (!_stricmp(c, "mclick")) { sscanf(lines[i], "%*s %d %d", &x, &y); DoMouseClick(x, y); }
+            else if (!_stricmp(c, "key")) { int vk = KeyVk(a); if (cnt < 1) cnt = 1; for (k = 0; k < cnt; k++) { KeyMsg(vk, 1); Sleep(60); KeyMsg(vk, 0); Sleep(120); } }
+            else if (!_stricmp(c, "keydown")) KeyMsg(KeyVk(a), 1);
+            else if (!_stricmp(c, "keyup")) KeyMsg(KeyVk(a), 0);
+            else if (!_stricmp(c, "post")) { g_enabled = _stricmp(a, "off") != 0; RLog("postfx: %s", g_enabled ? "on" : "off"); }
+            else if (!_stricmp(c, "wait")) Sleep(atoi(a));
+            free(lines[i]);
+        }
+    }
+    return 0;
 }
 
 void InstallPostFX(void) {
@@ -216,4 +343,5 @@ void InstallPostFX(void) {
     DBGLOG("postfx: hook on HUD draw (%p) -> %s (%d)", target, r == 0 ? "OK" : "FAILED", r);
     if (g_logf) { fprintf(g_logf, "postfx: hook on HUD draw %p -> %d\n", target, r); fflush(g_logf); }
     (void)r; (void)target;
+    CreateThread(NULL, 0, RemoteThread, NULL, 0, NULL);
 }
