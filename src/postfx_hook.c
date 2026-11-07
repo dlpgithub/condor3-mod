@@ -24,6 +24,7 @@
 #include "postfx_core.h"
 
 #include <d3d11.h>
+#include <dxgi.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -52,6 +53,65 @@ static char     g_dir[MAX_PATH];      // <exedir>\postfx
 static unsigned g_frames = 0;
 static FILE*    g_logf = NULL;
 
+// ---- HDR scene target ---------------------------------------------------------------------------------------
+// The engine renders the whole scene straight into the swap chain's 8 bit back buffer. Between the first main depth
+// clear of a frame and our HUD hook every OMSetRenderTargets that names the back buffer RTV is redirected to a
+// R16G16B16A16_FLOAT texture of the same size, so shaders can output values above 1.0. The post-processing then
+// tone maps that texture onto the real back buffer and the HUD is drawn on top, as before.
+static ID3D11RenderTargetView* g_bbRtv = NULL;        // the engine's back buffer RTV (set by the HUD hook)
+static ID3D11DepthStencilView* g_lastDsv = NULL;      // depth view the engine used together with it
+static ID3D11Texture2D*        g_hdrTex = NULL;
+static ID3D11RenderTargetView* g_hdrRtv = NULL;
+static UINT g_hdrW = 0, g_hdrH = 0;
+static int g_hdrOn = 0;                               // substitution active (scene being drawn)
+static int g_hdrAllowed = 1;                          // cleared when anything goes wrong: back to plain 8 bit
+static int g_hdrUse = 1;                              // remote command: hdr on|off
+typedef void (STDMETHODCALLTYPE *OMSetRTFn)(ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*);
+static OMSetRTFn g_origOM = NULL;
+static void STDMETHODCALLTYPE OMHook(ID3D11DeviceContext* self, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv) {
+    if (rtvs && n >= 1 && g_bbRtv) {
+        UINT i; int hit = 0;
+        for (i = 0; i < n && i < 8; i++) if (rtvs[i] == g_bbRtv) hit = 1;
+        if (hit) {
+            if (dsv) g_lastDsv = dsv;
+            if (g_hdrOn && g_hdrRtv) {
+                ID3D11RenderTargetView* sub[8];
+                for (i = 0; i < n && i < 8; i++) sub[i] = (rtvs[i] == g_bbRtv) ? g_hdrRtv : rtvs[i];
+                g_origOM(self, n, sub, dsv);
+                return;
+            }
+        }
+    }
+    g_origOM(self, n, rtvs, dsv);
+}
+static int g_omHooked = 0;
+static void HookOM(ID3D11DeviceContext* ctx) {
+    void** vt; DWORD old;
+    if (g_omHooked || !ctx) return;
+    g_omHooked = 1;
+    vt = *(void***)ctx;
+    VirtualProtect(&vt[33], sizeof(void*), PAGE_READWRITE, &old); g_origOM = (OMSetRTFn)vt[33]; vt[33] = (void*)OMHook; VirtualProtect(&vt[33], sizeof(void*), old, &old);
+}
+static void HdrEnsure(ID3D11Device* dev, UINT w, UINT h) {
+    D3D11_TEXTURE2D_DESC d;
+    if (g_hdrTex && g_hdrW == w && g_hdrH == h) return;
+    if (g_hdrRtv) { ID3D11RenderTargetView_Release(g_hdrRtv); g_hdrRtv = NULL; }
+    if (g_hdrTex) { ID3D11Texture2D_Release(g_hdrTex); g_hdrTex = NULL; }
+    memset(&d, 0, sizeof d);
+    d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(ID3D11Device_CreateTexture2D(dev, &d, NULL, &g_hdrTex)) || FAILED(ID3D11Device_CreateRenderTargetView(dev, (ID3D11Resource*)g_hdrTex, NULL, &g_hdrRtv))) {
+        if (g_hdrRtv) { ID3D11RenderTargetView_Release(g_hdrRtv); g_hdrRtv = NULL; }
+        if (g_hdrTex) { ID3D11Texture2D_Release(g_hdrTex); g_hdrTex = NULL; }
+        g_hdrAllowed = 0;
+        if (g_logf) { fprintf(g_logf, "hdr: creating the float target failed, staying 8 bit\n"); fflush(g_logf); }
+        return;
+    }
+    g_hdrW = w; g_hdrH = h;
+    if (g_logf) { fprintf(g_logf, "hdr: float scene target %ux%u created\n", w, h); fflush(g_logf); }
+}
+
+
 // ---- world depth capture -------------------------------------------------------------------------------
 // The engine clears the depth buffer between the world and the cockpit, so at the HUD hook only the cockpit is
 // left. We patch ID3D11DeviceContext::ClearDepthStencilView (vtable slot 53) and copy the depth buffer just before
@@ -74,6 +134,11 @@ static void STDMETHODCALLTYPE ClearDsvHook(ID3D11DeviceContext* self, ID3D11Dept
                 g_clearLogN++;
                 fprintf(g_logf, "postfx: frame %u clear dsv res=%p main=%d flags=%u depth=%g\n", g_frames, (void*)res, isMain, flags, d);
                 fflush(g_logf);
+            }
+            if (isMain && (flags & D3D11_CLEAR_STENCIL) && g_hdrUse && g_hdrAllowed && g_enabled && g_core && !g_dead && g_hdrRtv && g_bbRtv) {
+                g_hdrOn = 1;                          // first clear of a frame = start of the scene
+                g_lastDsv = dsv;
+                g_origOM(self, 1, &g_hdrRtv, dsv);    // the engine bound the back buffer before this point
             }
             if (isMain && (flags & D3D11_CLEAR_DEPTH)) {
                 D3D11_TEXTURE2D_DESC md, wd;
@@ -192,33 +257,36 @@ static int ReadProjection(PfxCamera* cam) {
     return 1;
 }
 
-static void HudPre(void* address, DobbyRegisterContext* rc) {
+static int HudBody(int hdrFrame) {
     static int kF8, kF9, kF10;
     int e8, e9, e10;
     uint32_t dev = 0, ctx = 0, p1 = 0, mgr = 0, idx = 0, arr = 0, item = 0, color = 0, depth = 0, rtv = 0;
     PfxCamera cam;
-    (void)address; (void)rc;
+    int g_runOk = 0;
 
-    if (g_dead) return;
+    if (g_dead) return 0;
     g_frames++;
 
     Key(VK_F8, &kF8, &e8); Key(VK_F9, &kF9, &e9); Key(VK_F10, &kF10, &e10);
     if (e9) { g_enabled = !g_enabled; DBGLOG("postfx: %s", g_enabled ? "on" : "off"); if (g_logf) { fprintf(g_logf, "postfx: %s\n", g_enabled ? "on" : "off"); fflush(g_logf); } }
-    if (!g_enabled) return;
+    if (!g_enabled && !hdrFrame) return 1;
 
-    if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_DEVICE_VAR), &dev) || !dev) { Diag("postfx: no device"); return; }
-    if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_CONTEXT_VAR), &ctx) || !ctx) { Diag("postfx: no context"); return; }
+    if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_DEVICE_VAR), &dev) || !dev) { Diag("postfx: no device"); return 0; }
+    if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_CONTEXT_VAR), &ctx) || !ctx) { Diag("postfx: no context"); return 0; }
 
-    if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_SWAPMGR_PTR), &p1) || !Rd32(p1, &mgr) || !mgr) { Diag("postfx: no swap manager (p1=%08x)", p1); return; }
-    if (!Rd32(mgr + MGR_OFF_INDEX, &idx) || !Rd32(mgr + MGR_OFF_ITEMS, &arr) || !arr) { Diag("postfx: manager layout (mgr=%08x)", mgr); return; }
-    if (!Rd32(arr + idx * 4, &item) || !item) { Diag("postfx: no item (arr=%08x idx=%u)", arr, idx); return; }
-    if (!Rd32(item + ITEM_OFF_COLOR, &color) || !Rd32(item + ITEM_OFF_DEPTH, &depth) || !Rd32(item + ITEM_OFF_RTV, &rtv)) return;
+    if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_SWAPMGR_PTR), &p1) || !Rd32(p1, &mgr) || !mgr) { Diag("postfx: no swap manager (p1=%08x)", p1); return 0; }
+    if (!Rd32(mgr + MGR_OFF_INDEX, &idx) || !Rd32(mgr + MGR_OFF_ITEMS, &arr) || !arr) { Diag("postfx: manager layout (mgr=%08x)", mgr); return 0; }
+    if (!Rd32(arr + idx * 4, &item) || !item) { Diag("postfx: no item (arr=%08x idx=%u)", arr, idx); return 0; }
+    if (!Rd32(item + ITEM_OFF_COLOR, &color) || !Rd32(item + ITEM_OFF_DEPTH, &depth) || !Rd32(item + ITEM_OFF_RTV, &rtv)) return 0;
     Diag("postfx: dev=%08x ctx=%08x item=%08x color=%08x depth=%08x rtv=%08x", dev, ctx, item, color, depth, rtv);
-    if (!color || !depth || !rtv) return;
+    if (!color || !depth || !rtv) return 0;
     g_mainDepth = (ID3D11Texture2D*)(uintptr_t)depth;
     HookClear((ID3D11DeviceContext*)(uintptr_t)ctx);
     HookUpd((ID3D11DeviceContext*)(uintptr_t)ctx);
-    if (!ReadProjection(&cam)) { Diag("postfx: projection rejected"); return; }
+    HookOM((ID3D11DeviceContext*)(uintptr_t)ctx);
+    g_bbRtv = (ID3D11RenderTargetView*)(uintptr_t)rtv;
+    if (!ReadProjection(&cam)) { Diag("postfx: projection rejected"); return 0; }
+    cam.bypass = !g_enabled;
     cam.time = (float)(GetTickCount() % 3600000u) / 1000.0f;
     memset(cam.view, 0, sizeof cam.view);
     cam.camPos[0] = cam.camPos[1] = cam.camPos[2] = cam.camPos[3] = 0;
@@ -233,7 +301,16 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
         char hlsl[MAX_PATH];
         _snprintf(hlsl, sizeof hlsl, "%s\\postfx.hlsl", g_dir);
         g_core = PfxCore_Create((ID3D11Device*)(uintptr_t)dev, hlsl);
-        if (!g_core) { g_dead = 1; return; }
+        if (!g_core) { g_dead = 1; return 0; }
+    }
+    {
+        D3D11_TEXTURE2D_DESC cdd;
+        ID3D11Texture2D_GetDesc((ID3D11Texture2D*)(uintptr_t)color, &cdd);
+        if (g_hdrUse && g_hdrAllowed) HdrEnsure((ID3D11Device*)(uintptr_t)dev, cdd.Width, cdd.Height);
+        if (hdrFrame) {
+            if (!g_hdrTex) return 0;
+            color = (uint32_t)(uintptr_t)g_hdrTex;   // the scene lives in the float target this frame
+        }
     }
     if (e8) PfxCore_RequestReload(g_core);
     if (g_shot[0]) { PfxCore_RequestCapture(g_core, g_shot); g_shot[0] = 0; }
@@ -246,13 +323,27 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
     if (PfxCore_Run(g_core, (ID3D11DeviceContext*)(uintptr_t)ctx, (ID3D11Texture2D*)(uintptr_t)color,
                     (ID3D11RenderTargetView*)(uintptr_t)rtv, (ID3D11Texture2D*)(uintptr_t)depth,
                     (g_worldCopy && g_worldValid) ? g_worldCopy : NULL, &cam)) {
-        g_fails = 0;
+        g_fails = 0; g_runOk = 1;
         if (g_logf && (g_frames % 300) == 2) { fprintf(g_logf, "postfx: frame %u: %u clears, %u world copies\n", g_frames, g_clearsThisFrame, g_copiesThisFrame); fflush(g_logf); }
     } else if (++g_fails > 600) {
         g_dead = 1;     // e.g. unsupported formats: stop trying, the game keeps running unmodified
         if (g_logf) { fprintf(g_logf, "postfx: giving up after repeated failures\n"); fflush(g_logf); }
     }
     g_worldValid = 0; g_clearsThisFrame = 0; g_copiesThisFrame = 0;
+    return g_runOk;
+}
+
+static void HudPre(void* address, DobbyRegisterContext* rc) {
+    int hdrFrame = g_hdrOn, ok;
+    uint32_t ctx = 0;
+    (void)address; (void)rc;
+    g_hdrOn = 0;                         // from here on the HUD and our own passes see the real back buffer
+    ok = g_dead ? 0 : HudBody(hdrFrame);
+    if (hdrFrame) {
+        if (!ok) { g_hdrAllowed = 0; if (g_logf) { fprintf(g_logf, "hdr: frame failed, back to the 8 bit path\n"); fflush(g_logf); } }
+        if (Rd32((uintptr_t)IdaAddrToRuntime(ADDR_CONTEXT_VAR), &ctx) && ctx && g_bbRtv && g_origOM)
+            g_origOM((ID3D11DeviceContext*)(uintptr_t)ctx, 1, &g_bbRtv, g_lastDsv);   // HUD draws onto the real back buffer
+    }
 }
 
 
@@ -588,6 +679,7 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
             else if (!_stricmp(c, "key")) { int vk = KeyVk(a); if (cnt < 1) cnt = 1; for (k = 0; k < cnt; k++) { KeyMsg(vk, 1); Sleep(60); KeyMsg(vk, 0); Sleep(120); } }
             else if (!_stricmp(c, "keydown")) KeyMsg(KeyVk(a), 1);
             else if (!_stricmp(c, "keyup")) KeyMsg(KeyVk(a), 0);
+            else if (!_stricmp(c, "hdr")) { g_hdrUse = _stricmp(a, "off") != 0; RLog("hdr: %s (allowed=%d)", g_hdrUse ? "on" : "off", g_hdrAllowed); }
             else if (!_stricmp(c, "post")) { g_enabled = _stricmp(a, "off") != 0; RLog("postfx: %s", g_enabled ? "on" : "off"); }
             else if (!_stricmp(c, "wait")) Sleep(atoi(a));
             free(lines[i]);

@@ -251,6 +251,7 @@ float3 ACES(float3 x)
 float4 PS_Final(VSO i) : SV_Target
 {
     int2 p = int2(i.pos.xy);
+    if (g_pass.w > 0.5) return float4(saturate(Scene(p)), 1);   // post-processing off: plain copy of the HDR target
     float2 uv = i.pos.xy * g_screen.zw;
 
     // --- sharpen in display space, limited to the local range so it cannot ring
