@@ -15,8 +15,10 @@
   "cool_ambient": 0.08,
   "linear_light": 1,
   "hemi_ambient": 0.7,
-  "sun_gain": 1.1,
+  "sun_gain": 1.35,
   "amb_gain": 0.7,
   "cloud_shade": 0.35,
-  "cloud_silver": 0.9
+  "cloud_silver": 0.9,
+  "hdr": 1,
+  "sun_disc": 3.0
 }

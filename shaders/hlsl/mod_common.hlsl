@@ -2,6 +2,14 @@
 // Condor 3 shader mod - shared helpers (inserted by build_shaders.py)
 // ============================================================================
 #define MOD_SATURATION   @saturation@
+#define MOD_HDR          @hdr@
+#define MOD_SUN_DISC     @sun_disc@
+// With the HDR scene target (postfx hdr on) shaders may output values above 1: the post-processing tone maps them.
+#if MOD_HDR
+#define MOD_SAT(x)  max(x, 0.0)
+#else
+#define MOD_SAT(x)  saturate(x)
+#endif
 #define MOD_CURVE        @curve@
 #define MOD_DITHER       @dither@
 #define MOD_MACRO_DETAIL @macro_detail@
@@ -22,9 +30,9 @@ float4 ModAmb(float4 amb) { return float4(amb.rgb * float3(1.0 - MOD_COOL, 1.0, 
 // clouds, trees, aircraft) so haze and fog colours keep matching each other.
 float3 ModGrade(float3 c)
 {
-    c = saturate(c);
+    c = MOD_SAT(c);
     float l = dot(c, float3(0.299, 0.587, 0.114));
-    c = saturate(lerp(float3(l, l, l), c, MOD_SATURATION));
+    c = MOD_SAT(lerp(float3(l, l, l), c, MOD_SATURATION));
     float3 s = c * c * (3.0 - 2.0 * c);
     return lerp(c, s, MOD_CURVE);
 }
@@ -69,5 +77,5 @@ float3 ModLit(float3 tex, float4 sunC, float4 ambC, float sundot, float3 n, floa
     float3 gndA = al * float3(0.50, 0.46, 0.40);
     float3 amb = lerp(al, lerp(gndA, skyA, hemi) * 1.25, MOD_HEMI);
     float3 c = a * (sl * saturate(sundot) * directK + amb);
-    return pow(saturate(c), 1.0 / 2.2);
+    return pow(MOD_SAT(c), 1.0 / 2.2);
 }

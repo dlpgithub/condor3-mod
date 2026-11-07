@@ -72,6 +72,8 @@ def common_block(o):
         t = fh.read()
     vals = {
         "saturation": "%.4f" % o["grade_saturation"],
+        "hdr": "1" if o.get("hdr") else "0",
+        "sun_disc": "%.4f" % o.get("sun_disc", 1.0),
         "curve": "%.4f" % o["grade_contrast"],
         "dither": "%.4f" % o["dither"],
         "macro_detail": "%.4f" % o["macro_detail"],

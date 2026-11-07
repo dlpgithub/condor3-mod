@@ -172,7 +172,7 @@ def patch_cloud(src, o):
                   "\t\tfloat ModShade = lerp(1.0 - %.3f, 1.0, ModUp);\n"
                   "\t\tfloat ModThin = saturate(1.0 - 1.6 * TextureColor.a);\n"
                   "\t\tfloat ModFwd = exp(-4.0 * input.dAngle) * (0.4 + 0.6 * saturate(1.0 - ModNU.z * ModNU.z));\n"
-                  "\t\tLightingColor = saturate(SunColor * lightIntensity * ModShade + AmbientColor * lerp(ModShade, 1.0, 0.5) + 0.5 * glare + %.3f * ModFwd * ModThin * SunColor);"
+                  "\t\tLightingColor = MOD_SAT(SunColor * lightIntensity * ModShade + AmbientColor * lerp(ModShade, 1.0, 0.5) + 0.5 * glare + %.3f * ModFwd * ModThin * SunColor);"
                   % (shade, silver), what="Cloud: lighting")
     return wrap_returns(src, r"return (lerp\([^;]*\));", 2, "Cloud: grade")
 
@@ -183,11 +183,12 @@ def patch_middle_clouds(src, o):
 
 
 def patch_high_clouds(src, o):
+    src = rep(src, "float4(SunColor.xyz, Alpha)", "float4(SunColor.xyz * MOD_SUN_DISC, Alpha)", what="HighClouds: sun disc")
     if o["anisotropy"] > 1:
         src = rep(src, "Filter = ANISOTROPIC;",
                   "Filter = ANISOTROPIC;\n    MaxAnisotropy = %d;" % o["anisotropy"],
                   what="HighClouds: anisotropy")
-    return wrap_returns(src, r"return (txDiffuse\.Sample\( samLinear, input\.Tex \) \* float4\(SunColor\.xyz, Alpha\));",
+    return wrap_returns(src, r"return (txDiffuse\.Sample\( samLinear, input\.Tex \) \* float4\(SunColor\.xyz \* MOD_SUN_DISC, Alpha\));",
                         1, "HighClouds: grade")
 
 
