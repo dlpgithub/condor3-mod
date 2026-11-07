@@ -28,19 +28,20 @@ float4 ModAmb(float4 amb) { return float4(amb.rgb * float3(1.0 - MOD_COOL, 1.0, 
 // Gentle colour grade: saturation + a soft S-curve for contrast.
 // Applied to everything that ends up on screen *together* (terrain, sky,
 // clouds, trees, aircraft) so haze and fog colours keep matching each other.
-float3 ModGrade(float3 c)
+float3 ModGradeX(float3 c, bool hdr)
 {
-    c = MOD_SAT(c);
+    c = hdr ? max(c, 0.0) : saturate(c);
     float l = dot(c, float3(0.299, 0.587, 0.114));
-    c = MOD_SAT(lerp(float3(l, l, l), c, MOD_SATURATION));
-    float3 s = c * c * (3.0 - 2.0 * c);
-    return lerp(c, s, MOD_CURVE);
+    c = lerp(float3(l, l, l), c, MOD_SATURATION);
+    c = hdr ? max(c, 0.0) : saturate(c);
+    float3 s = saturate(c);
+    s = s * s * (3.0 - 2.0 * s);
+    return hdr ? c : lerp(c, s, MOD_CURVE);
 }
-
-float4 ModGradeA(float4 c)
-{
-    return float4(ModGrade(c.rgb), c.a);
-}
+float3 ModGrade(float3 c)  { return ModGradeX(c, false); }                 // sky, clouds, aircraft: stay in 0..1
+float3 ModGradeH(float3 c) { return ModGradeX(c, MOD_HDR != 0); }          // terrain, trees, grass: may exceed 1 with the HDR target
+float4 ModGradeA(float4 c)  { return float4(ModGrade(c.rgb), c.a); }
+float4 ModGradeAH(float4 c) { return float4(ModGradeH(c.rgb), c.a); }
 
 // Interleaved-gradient noise, +-0.5 LSB. Removes banding in sky gradients.
 float ModDither(float2 p)

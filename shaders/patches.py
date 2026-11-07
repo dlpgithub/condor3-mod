@@ -81,10 +81,10 @@ def patch_land(src, o):
             "\t  { ModFog = saturate(1.1 * exp(-0.000000001 * dot(ModLook, ModLook)) - 0.1); }\n"
             "\tfloat3 ModSky = ModSkyColor(normalize(ModLook), FogColor.xyz, SunColor.xyz, SunPos);\n"
             "\tfloat4 ModOut = lerp(float4(ModSky, 0), LITEXPR, ModFog);\n"
-            "\tModOut.rgb = ModGrade(ModOut.rgb) + ModDither(input.Pos.xy);\n"
+            "\tModOut.rgb = ModGradeH(ModOut.rgb) + ModDither(input.Pos.xy);\n"
             "\treturn ModOut;")
     else:
-        new = "return ModGradeA(%s);" % old[len("return "):-1]
+        new = "return ModGradeAH(%s);" % old[len("return "):-1]
     if o.get("linear_light", 0):
         lit = "float4(ModLit(TextureColor.rgb, ModSun(SunColor), ModAmb(AmbientColor), sundot, ModN, TotalShadow), 1)"
     else:
@@ -133,7 +133,7 @@ def patch_autoobjects(src, o):
                                "\toutput.SkyColor.rgb = ModSkyColor(LookVec, FogColor.xyz, SunColor.xyz, SunPos);",
                      what="AutoObjects: haze")
     return rep(src, "return lerp(input.SkyColor, FinalColor, input.fogFactor);",
-               "return ModGradeA(lerp(input.SkyColor, FinalColor, input.fogFactor));",
+               "return ModGradeAH(lerp(input.SkyColor, FinalColor, input.fogFactor));",
                what="AutoObjects: grade")
 
 
@@ -149,7 +149,7 @@ def patch_grass(src, o):
         src = rep(src, "float4 OutputColor = float4(input.Color.rgb * (TexColor.rgb + 0.5) * LightingColor * TotalShadow, TexColor.a);",
                   "float4 OutputColor = float4(ModLit(input.Color.rgb * (TexColor.rgb + 0.5), ModSun(SunColor), ModAmb(AmbientColor), sundot, float3(0, 0, 1), TotalShadow), TexColor.a);",
                   what="Grass: linear light")
-    return rep(src, "return OutputColor;", "return ModGradeA(OutputColor);", what="Grass: grade")
+    return rep(src, "return OutputColor;", "return ModGradeAH(OutputColor);", what="Grass: grade")
 
 
 # --------------------------------------------------------------------------
@@ -172,7 +172,7 @@ def patch_cloud(src, o):
                   "\t\tfloat ModShade = lerp(1.0 - %.3f, 1.0, ModUp);\n"
                   "\t\tfloat ModThin = saturate(1.0 - 1.6 * TextureColor.a);\n"
                   "\t\tfloat ModFwd = exp(-4.0 * input.dAngle) * (0.4 + 0.6 * saturate(1.0 - ModNU.z * ModNU.z));\n"
-                  "\t\tLightingColor = MOD_SAT(SunColor * lightIntensity * ModShade + AmbientColor * lerp(ModShade, 1.0, 0.5) + 0.5 * glare + %.3f * ModFwd * ModThin * SunColor);"
+                  "\t\tLightingColor = saturate(SunColor * lightIntensity * ModShade + AmbientColor * lerp(ModShade, 1.0, 0.5) + 0.5 * glare + %.3f * ModFwd * ModThin * SunColor);"
                   % (shade, silver), what="Cloud: lighting")
     return wrap_returns(src, r"return (lerp\([^;]*\));", 2, "Cloud: grade")
 
