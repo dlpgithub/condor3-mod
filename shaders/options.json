@@ -1,26 +1,22 @@
 {
   "_comment": "Set a strength to 0 (or anisotropy to 1) to switch that tweak off. Rebuild + reinstall after editing: python3 build_shaders.py install",
-
   "game_dir": "~/Condor3",
-
   "anisotropy": 16,
   "cloud_linear_filter": true,
   "per_pixel_atmosphere": true,
   "unify_tree_haze": true,
-
   "dither": 1.0,
   "grade_saturation": 1.0,
   "grade_contrast": 0.0,
-
   "macro_detail": 0.35,
   "water_glint": 0.8,
-
   "shadow_strength": 0.62,
-  "warm_sun": 0.10,
+  "warm_sun": 0.1,
   "cool_ambient": 0.08,
-
   "linear_light": 1,
   "hemi_ambient": 0.7,
-  "sun_gain": 1.10,
-  "amb_gain": 0.70
+  "sun_gain": 1.1,
+  "amb_gain": 0.7,
+  "cloud_shade": 0.35,
+  "cloud_silver": 0.9
 }

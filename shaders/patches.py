@@ -161,6 +161,19 @@ def patch_cloud(src, o):
         # close and shimmering far away. Trilinear fixes both.
         src = rep(src, "Filter = MIN_MAG_MIP_POINT;", "Filter = MIN_MAG_MIP_LINEAR;",
                   what="Cloud: filter")
+    shade = o.get("cloud_shade", 0.0)
+    silver = o.get("cloud_silver", 0.0)
+    if shade > 0 or silver > 0:
+        # Cloud puffs: darker undersides / shaded cores, bright thin rims when the
+        # camera looks toward the sun (silver lining, forward scattering).
+        src = rep(src, "LightingColor = saturate(SunColor * lightIntensity + AmbientColor + 0.5 * glare);",
+                  "float3 ModNU = normalize(input.NormUp);\n"
+                  "\t\tfloat ModUp = saturate(ModNU.z * 0.5 + 0.5);\n"
+                  "\t\tfloat ModShade = lerp(1.0 - %.3f, 1.0, ModUp);\n"
+                  "\t\tfloat ModThin = saturate(1.0 - 1.6 * TextureColor.a);\n"
+                  "\t\tfloat ModFwd = exp(-4.0 * input.dAngle) * (0.4 + 0.6 * saturate(1.0 - ModNU.z * ModNU.z));\n"
+                  "\t\tLightingColor = saturate(SunColor * lightIntensity * ModShade + AmbientColor * lerp(ModShade, 1.0, 0.5) + 0.5 * glare + %.3f * ModFwd * ModThin * SunColor);"
+                  % (shade, silver), what="Cloud: lighting")
     return wrap_returns(src, r"return (lerp\([^;]*\));", 2, "Cloud: grade")
 
 
