@@ -1,3 +1,8 @@
 **/.DS_Store
 build/
 deps/
+# post-fx test frames / renders
+postfx/test/*.bin
+postfx/test/*.bmp
+postfx/test/*.png
+deps/

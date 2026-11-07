@@ -7,6 +7,7 @@ add_compile_definitions(_WIN32_WINNT=0x0600 WINVER=0x0600)
 # Optionale Patches (per -DENABLE_...=OFF abschaltbar)
 option(ENABLE_MOVE_PATCHES       "Delphi Move/FastMM patches" OFF)
 option(ENABLE_HANGAR_PREVIEW_FIX "Hangar preview fix"         ON)
+option(ENABLE_POSTFX             "Post-processing (SSAO, bloom, tone mapping)" ON)
 
 # Dobby comes prebuilt (scripts/build_dobby.sh, run inside the dev container).
 set(DOBBY_PREBUILT_DIR "${CMAKE_SOURCE_DIR}/deps/dobby-prebuilt"
@@ -45,6 +46,9 @@ endif()
 if(ENABLE_HANGAR_PREVIEW_FIX)
     list(APPEND D3DX_SOURCES src/patch_hangar_preview.c)
 endif()
+if(ENABLE_POSTFX)
+    list(APPEND D3DX_SOURCES src/postfx_core.c src/postfx_hook.c)
+endif()
 
 add_library(d3dx_proxy SHARED ${D3DX_SOURCES})
 
@@ -53,6 +57,9 @@ if(ENABLE_MOVE_PATCHES)
 endif()
 if(ENABLE_HANGAR_PREVIEW_FIX)
     target_compile_definitions(d3dx_proxy PRIVATE ENABLE_HANGAR_PREVIEW_FIX)
+endif()
+if(ENABLE_POSTFX)
+    target_compile_definitions(d3dx_proxy PRIVATE ENABLE_POSTFX)
 endif()
 
 set_target_properties(d3dx_proxy PROPERTIES
@@ -70,3 +77,8 @@ target_link_options(d3dx_proxy PRIVATE -static-libgcc -static-libstdc++)
 add_executable(d3dx_proxy_monitor tools/monitor.c)
 target_link_libraries(d3dx_proxy_monitor PRIVATE ws2_32)
 target_link_options(d3dx_proxy_monitor PRIVATE -static-libgcc -static-libstdc++)
+
+# Offline test bench for the post-processing chain (no game needed): tools/pfxtest.c
+add_executable(pfxtest tools/pfxtest.c src/postfx_core.c)
+target_link_libraries(pfxtest PRIVATE d3d11)
+target_link_options(pfxtest PRIVATE -static-libgcc -static-libstdc++)
