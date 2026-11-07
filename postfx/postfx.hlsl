@@ -41,8 +41,10 @@ cbuffer CB : register(b0)
 Texture2D g_t0 : register(t0);
 #if DEPTH_MS
 Texture2DMS<float4> g_depth : register(t1);
+Texture2DMS<float4> g_world : register(t6);
 #else
 Texture2D<float4> g_depth : register(t1);
+Texture2D<float4> g_world : register(t6);
 #endif
 Texture2D g_t2 : register(t2);
 Texture2D g_t3 : register(t3);
@@ -68,9 +70,9 @@ float LoadDepth(int2 p)
 {
     p = clamp(p, int2(0, 0), int2(g_screen.xy) - 1);
 #if DEPTH_MS
-    return g_depth.Load(p, 0).x;
+    return max(g_depth.Load(p, 0).x, g_world.Load(p, 0).x);
 #else
-    return g_depth.Load(int3(p, 0)).x;
+    return max(g_depth.Load(int3(p, 0)).x, g_world.Load(int3(p, 0)).x);
 #endif
 }
 
