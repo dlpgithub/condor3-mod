@@ -288,7 +288,8 @@ TAAO PS_TAA(VSO i)
     bool cockpit = (dc > dw) && !IsSky(dc);       // the engine clears depth again before the cockpit: it moves with the camera
 
     float2 px = i.pos.xy;
-    bool ok = (g_pass.x > 0.5) && (g_prevCam.w > 0.5);
+    bool ok = (g_pass.x > 0.5);
+    bool okWorld = (g_prevCam.w > 0.5);
     if (!cockpit)
     {
         float3 pv;
@@ -305,10 +306,11 @@ TAAO PS_TAA(VSO i)
             float3 wp = mul(ViewPos(p, ViewZ(d)), transpose(R));
             pv = mul(wp + g_camPos.xyz - g_prevCam.xyz, Rp);
         }
-        ok = ok && (pv.z > 0.01);
+        okWorld = okWorld && (pv.z > 0.01);
         float2 n2 = float2(pv.x / max(pv.z, 0.01) * g_proj.x, pv.y / max(pv.z, 0.01) * g_proj.y);
         px = float2(n2.x * 0.5 + 0.5, 0.5 - n2.y * 0.5) * g_screen.xy;
-        ok = ok && all(px > 1.0) && all(px < g_screen.xy - 1.0);
+        okWorld = okWorld && all(px > 1.0) && all(px < g_screen.xy - 1.0);
+        if (!okWorld) px = i.pos.xy;
     }
 
     float3 res = cur;
@@ -324,10 +326,16 @@ TAAO PS_TAA(VSO i)
         m1 /= 9.0; m2 /= 9.0;
         float3 sd = sqrt(max(m2 - m1 * m1, 0.0));
         float3 lo = max(mn, m1 - 1.25 * sd), hi = min(mx, m1 + 1.25 * sd);
+        // two motion hypotheses: static world (reprojected) and "moves with the camera" (cockpit, own glider body in
+        // external view). Use whichever history agrees better with the current neighbourhood.
         float3 h = TAA_History(px);
         float3 hc = clamp(h, lo, hi);
         float dist = length(h - hc);
-        float k = saturate(TAA_BLEND + dist * 2.0);
+        float3 h2 = g_t2.SampleLevel(g_lin, i.pos.xy * g_screen.zw, 0).rgb;
+        float3 hc2 = clamp(h2, lo, hi);
+        float dist2 = length(h2 - hc2);
+        if (cockpit || dist2 < dist * 0.6) { h = h2; hc = hc2; dist = dist2; }
+        float k = saturate(TAA_BLEND + dist * 0.6);
         res = lerp(hc, cur, k);
     }
     o.c = float4(res, 1);
