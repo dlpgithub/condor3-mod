@@ -119,6 +119,10 @@ def patch_autoobjects(src, o):
     src = rep(src, "float TotalShadow = 0.6 + 0.4 * min(CloudShadow, shadowFactor);",
               "float TotalShadow = (1.0 - MOD_SHADOW) + MOD_SHADOW * min(CloudShadow, shadowFactor);", what="AutoObjects: shadow")
     src = rep(src, "saturate(SunExposure * SunColor * TexColor", "saturate(SunExposure * ModSun(SunColor) * TexColor", what="AutoObjects: tint")
+    if o.get("linear_light", 0):
+        src = rep(src, "float4 FinalColor = saturate(SunExposure * ModSun(SunColor) * TexColor * (0.8 + 0.3 * input.Random));",
+                  "float4 FinalColor = float4(ModLit(TexColor.rgb * (0.8 + 0.3 * input.Random), ModSun(SunColor), float4(FogColor.rgb * 0.45, 1), saturate(0.2 + 0.8 * sundot), normalize(input.Normal.xyz), TotalShadow), 1);",
+                  what="AutoObjects: linear light")
     if o["unify_tree_haze"]:
         # Trees used a different haze formula than terrain and sky, so distant
         # forests faded to a slightly different colour than the ground behind.
@@ -141,6 +145,10 @@ def patch_grass(src, o):
               "float TotalShadow = (1.0 - MOD_SHADOW) + MOD_SHADOW * min(input.CloudShadow, shadowFactor);", what="Grass: shadow")
     src = rep(src, "float4 LightingColor = saturate(SunColor * sundot + AmbientColor);",
               "float4 LightingColor = saturate(ModSun(SunColor) * sundot + ModAmb(AmbientColor));", what="Grass: light tint")
+    if o.get("linear_light", 0):
+        src = rep(src, "float4 OutputColor = float4(input.Color.rgb * (TexColor.rgb + 0.5) * LightingColor * TotalShadow, TexColor.a);",
+                  "float4 OutputColor = float4(ModLit(input.Color.rgb * (TexColor.rgb + 0.5), ModSun(SunColor), ModAmb(AmbientColor), sundot, float3(0, 0, 1), TotalShadow), TexColor.a);",
+                  what="Grass: linear light")
     return rep(src, "return OutputColor;", "return ModGradeA(OutputColor);", what="Grass: grade")
 
 
