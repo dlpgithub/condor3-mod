@@ -17,7 +17,3 @@ The mod polls `<game>/postfx/cmd.txt` every 200 ms; results go to `postfx/postfx
 `mclick X Y`, `peek/poke EXPR`, `scan`, `watch/unwatch`, and `move dx dy dz` (offsets the glider's world position,
 doubles at glider object +0x6d8/0x6e0/0x6e8). Altitude screenshots: `kkey p`, `move 0 0 N`, `wait 400`, `kkey p`,
 then wait ~2.5 s before `shot` (the frame needs time to refresh).
-
-
-## Temporal anti-aliasing (TAA)
-The game's viewport is shifted by a sub-pixel Halton offset every frame (hook on RSSetViewports, only between the first main depth clear and the HUD hook). `PS_TAA` in postfx.hlsl reprojects the previous result with depth + the engine camera, clamps it to the local colour range and blends. Cockpit pixels (second depth clear) use zero motion. Remote command: `taa on|off`. Tweak `TAA_BLEND` (default 0.12) in postfx.hlsl.

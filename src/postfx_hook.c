@@ -47,13 +47,6 @@ static PfxCore* g_core = NULL;
 static char     g_shot[MAX_PATH];     // pending 'shot' request (capture path), consumed by the frame hook
 static int      g_enabled = 1;
 static int      g_dead = 0;           // gave up (fatal problem)
-static int g_vpLog = 0;
-static float Halton(unsigned i, unsigned b);
-static int g_taa = 1;                 // temporal anti-aliasing on/off (remote command: taa on|off)
-static int g_jitActive = 0;           // jitter applies to main-size viewports (between the first main clear and the HUD hook)
-static float g_jx = 0, g_jy = 0;      // current jitter in pixels
-static UINT g_mainW = 0, g_mainH = 0; // size of the main colour buffer
-static float g_prevView[16], g_prevCam[4]; static int g_prevValid = 0;
 static int      g_fails = 0;
 static char     g_dir[MAX_PATH];      // <exedir>\postfx
 static unsigned g_frames = 0;
@@ -81,11 +74,6 @@ static void STDMETHODCALLTYPE ClearDsvHook(ID3D11DeviceContext* self, ID3D11Dept
                 g_clearLogN++;
                 fprintf(g_logf, "postfx: frame %u clear dsv res=%p main=%d flags=%u depth=%g\n", g_frames, (void*)res, isMain, flags, d);
                 fflush(g_logf);
-            }
-            if (g_vpLog > 0 && g_logf) { fprintf(g_logf, "vp: CLEAR main=%d flags=%u\n", isMain, flags); fflush(g_logf); }
-            if (isMain && (flags & D3D11_CLEAR_STENCIL) && g_taa && g_core && !g_dead && g_mainW) {   // first clear of a frame: pick this frame's jitter
-                unsigned k = g_frames % 16;
-                g_jx = Halton(k, 2) - 0.5f; g_jy = Halton(k, 3) - 0.5f; g_jitActive = 1;
             }
             if (isMain && (flags & D3D11_CLEAR_DEPTH)) {
                 D3D11_TEXTURE2D_DESC md, wd;
@@ -156,37 +144,6 @@ static void HookUpd(ID3D11DeviceContext* ctx) {
     VirtualProtect(&vt[48], sizeof(void*), old, &old);
 }
 
-// ---- viewport hook (TAA jitter + investigation) ---------------------------------------------------------------
-#define VT_RS_VIEWPORTS 44
-typedef void (STDMETHODCALLTYPE *RSVPFn)(ID3D11DeviceContext*, UINT, const D3D11_VIEWPORT*);
-static RSVPFn g_origVP = NULL;
-static void STDMETHODCALLTYPE VPHook(ID3D11DeviceContext* self, UINT n, const D3D11_VIEWPORT* vps) {
-    if (g_vpLog > 0 && vps && n >= 1) {
-        g_vpLog--;
-        if (g_logf) { fprintf(g_logf, "vp: frame %u n=%u %g,%g %gx%g z %g..%g\n", g_frames, n, vps[0].TopLeftX, vps[0].TopLeftY, vps[0].Width, vps[0].Height, vps[0].MinDepth, vps[0].MaxDepth); fflush(g_logf); }
-    }
-    if (g_jitActive && g_taa && g_enabled && n == 1 && vps && g_mainW &&
-        vps[0].TopLeftX == 0 && vps[0].TopLeftY == 0 && (UINT)vps[0].Width == g_mainW && (UINT)vps[0].Height == g_mainH) {
-        D3D11_VIEWPORT v = vps[0];
-        v.TopLeftX += g_jx; v.TopLeftY += g_jy;
-        g_origVP(self, 1, &v);
-        return;
-    }
-    g_origVP(self, n, vps);
-}
-static float Halton(unsigned i, unsigned b) { float f = 1.0f, r = 0.0f; i++; while (i) { f /= (float)b; r += f * (float)(i % b); i /= b; } return r; }
-static int g_vpHooked = 0;
-static void HookVP(ID3D11DeviceContext* ctx) {
-    void** vt; DWORD old;
-    if (g_vpHooked || !ctx) return;
-    g_vpHooked = 1;
-    vt = *(void***)ctx;
-    if (!VirtualProtect(&vt[VT_RS_VIEWPORTS], sizeof(void*), PAGE_READWRITE, &old)) return;
-    g_origVP = (RSVPFn)vt[VT_RS_VIEWPORTS];
-    vt[VT_RS_VIEWPORTS] = (void*)VPHook;
-    VirtualProtect(&vt[VT_RS_VIEWPORTS], sizeof(void*), old, &old);
-}
-
 static int g_clearHooked = 0;
 static void HookClear(ID3D11DeviceContext* ctx) {
     void** vt; DWORD old;
@@ -242,7 +199,6 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
     PfxCamera cam;
     (void)address; (void)rc;
 
-    g_jitActive = 0;      // the scene is finished: HUD and post-processing draw without jitter
     if (g_dead) return;
     g_frames++;
 
@@ -259,17 +215,9 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
     if (!Rd32(item + ITEM_OFF_COLOR, &color) || !Rd32(item + ITEM_OFF_DEPTH, &depth) || !Rd32(item + ITEM_OFF_RTV, &rtv)) return;
     Diag("postfx: dev=%08x ctx=%08x item=%08x color=%08x depth=%08x rtv=%08x", dev, ctx, item, color, depth, rtv);
     if (!color || !depth || !rtv) return;
-    {
-        D3D11_TEXTURE2D_DESC cdsc;
-        ID3D11Texture2D_GetDesc((ID3D11Texture2D*)(uintptr_t)color, &cdsc);
-        g_mainW = cdsc.Width; g_mainH = cdsc.Height;
-    }
     g_mainDepth = (ID3D11Texture2D*)(uintptr_t)depth;
     HookClear((ID3D11DeviceContext*)(uintptr_t)ctx);
     HookUpd((ID3D11DeviceContext*)(uintptr_t)ctx);
-    HookVP((ID3D11DeviceContext*)(uintptr_t)ctx);
-    if (g_frames == 300) g_vpLog = 80;
-    if (g_vpLog > 0 && g_logf) { fprintf(g_logf, "vp: --- HUD hook frame %u\n", g_frames); fflush(g_logf); }
     if (!ReadProjection(&cam)) { Diag("postfx: projection rejected"); return; }
     cam.time = (float)(GetTickCount() % 3600000u) / 1000.0f;
     memset(cam.view, 0, sizeof cam.view);
@@ -281,9 +229,6 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
         memcpy(cam.sunColor, g_atmo.sunColor, 16); memcpy(cam.amb, g_atmo.amb, 16);
     }
 
-    memcpy(cam.prevView, g_prevView, sizeof cam.prevView); memcpy(cam.prevCam, g_prevCam, sizeof cam.prevCam);
-    cam.prevCam[3] = (g_prevValid && cam.camPos[3] > 0.5f) ? 1.0f : 0.0f;
-    cam.taa = g_taa;
     if (!g_core) {
         char hlsl[MAX_PATH];
         _snprintf(hlsl, sizeof hlsl, "%s\\postfx.hlsl", g_dir);
@@ -308,12 +253,6 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
         if (g_logf) { fprintf(g_logf, "postfx: giving up after repeated failures\n"); fflush(g_logf); }
     }
     g_worldValid = 0; g_clearsThisFrame = 0; g_copiesThisFrame = 0;
-    {   // the saved/restored viewport was the jittered one: put back the plain full-size viewport for the HUD
-        D3D11_VIEWPORT mv; mv.TopLeftX = 0; mv.TopLeftY = 0; mv.Width = (float)g_mainW; mv.Height = (float)g_mainH; mv.MinDepth = 0; mv.MaxDepth = 1;
-        if (g_origVP) g_origVP((ID3D11DeviceContext*)(uintptr_t)ctx, 1, &mv);
-    }
-    if (cam.camPos[3] > 0.5f) { memcpy(g_prevView, cam.view, sizeof g_prevView); memcpy(g_prevCam, cam.camPos, sizeof g_prevCam); g_prevValid = 1; }
-    else g_prevValid = 0;
 }
 
 
@@ -649,7 +588,6 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
             else if (!_stricmp(c, "key")) { int vk = KeyVk(a); if (cnt < 1) cnt = 1; for (k = 0; k < cnt; k++) { KeyMsg(vk, 1); Sleep(60); KeyMsg(vk, 0); Sleep(120); } }
             else if (!_stricmp(c, "keydown")) KeyMsg(KeyVk(a), 1);
             else if (!_stricmp(c, "keyup")) KeyMsg(KeyVk(a), 0);
-            else if (!_stricmp(c, "taa")) { g_taa = _stricmp(a, "off") != 0; RLog("taa: %s", g_taa ? "on" : "off"); }
             else if (!_stricmp(c, "post")) { g_enabled = _stricmp(a, "off") != 0; RLog("postfx: %s", g_enabled ? "on" : "off"); }
             else if (!_stricmp(c, "wait")) Sleep(atoi(a));
             free(lines[i]);
