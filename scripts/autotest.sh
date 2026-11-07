@@ -16,3 +16,9 @@ case "$1" in
   shot)
     screencapture -x /tmp/_shot.png && sips -Z 1200 /tmp/_shot.png --out "$2" >/dev/null ;;
 esac
+case "$1" in
+  startflight)   # launch, open Free Flight, press Start flight, wait until the frame hook runs
+    "$0" launch; "$0" cmd "mclick 137 212"; sleep 14; "$0" cmd "mclick 991 668"
+    for i in $(seq 1 40); do sleep 3; "$0" cmd "state" >/dev/null; grep -q "flying=1" <(tail -3 $GAME/postfx/postfx.log) && break; done
+    sleep 3 ;;
+esac

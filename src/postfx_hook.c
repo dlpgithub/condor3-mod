@@ -269,6 +269,135 @@ static void DoClick(int x, int y) {
     PostMessageA(h, WM_LBUTTONUP, 0, lp);
     RLog("clicked %d,%d on window %p", x, y, (void*)h);
 }
+
+
+// ---- free camera ---------------------------------------------------------------------------------------------
+// The camera manager (*(0x7D96F8)) holds the view matrix at +0x108 (D3DX, left handed) and its inverse at +0x148
+// (rows: right, up, forward, position). World: z is up. We overwrite both right at the start of the scene pass.
+#define ADDR_SCENE_DRAW 0x0073B59C
+#define CAM_OFF_VIEW    0x108
+#define CAM_OFF_WORLD   0x148
+static volatile int g_camFree = 0;
+static float g_camPos[3], g_camYaw = 0, g_camPitch = 0;      // yaw: degrees, 0 = world +y, clockwise seen from above; pitch: up positive
+static volatile int g_camLatch = 0;                          // request: copy the engine camera into g_cam*
+
+static void ScenePre(void* address, DobbyRegisterContext* rc) {
+    uint32_t mgr = 0; float* view; float* world;
+    (void)address; (void)rc;
+    if (!g_camFree && !g_camLatch) return;
+    if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_CAMMGR_VAR), &mgr) || !mgr) return;
+    view = (float*)(uintptr_t)(mgr + CAM_OFF_VIEW); world = (float*)(uintptr_t)(mgr + CAM_OFF_WORLD);
+    if (IsBadReadPtr(view, 64) || IsBadReadPtr(world, 64) || IsBadWritePtr(view, 64) || IsBadWritePtr(world, 64)) return;
+    if (g_camLatch) {       // read pos/orientation from the engine's own world matrix
+        float fx = world[8], fy = world[9], fz = world[10];
+        g_camPos[0] = world[12]; g_camPos[1] = world[13]; g_camPos[2] = world[14];
+        g_camPitch = asinf(fz) * 57.29578f; g_camYaw = atan2f(fx, fy) * 57.29578f;
+        g_camLatch = 0;
+        RLog("cam latched: pos %.1f %.1f %.1f yaw %.1f pitch %.1f", g_camPos[0], g_camPos[1], g_camPos[2], g_camYaw, g_camPitch);
+        if (!g_camFree) return;
+    }
+    {
+        float y = g_camYaw * 0.0174533f, t = g_camPitch * 0.0174533f;
+        float f[3] = { sinf(y) * cosf(t), cosf(y) * cosf(t), sinf(t) };
+        float r[3] = { f[1], -f[0], 0 };                 // up0 x forward, up0 = (0,0,1)
+        float rl = sqrtf(r[0] * r[0] + r[1] * r[1]), u[3]; int i;
+        if (rl < 1e-6f) { r[0] = 1; r[1] = 0; rl = 1; }
+        r[0] /= rl; r[1] /= rl;
+        u[0] = f[1] * r[2] - f[2] * r[1]; u[1] = f[2] * r[0] - f[0] * r[2]; u[2] = f[0] * r[1] - f[1] * r[0];
+        for (i = 0; i < 3; i++) {
+            world[i] = r[i]; world[4 + i] = u[i]; world[8 + i] = f[i]; world[12 + i] = g_camPos[i];
+            view[i * 4 + 0] = r[i]; view[i * 4 + 1] = u[i]; view[i * 4 + 2] = f[i]; view[i * 4 + 3] = 0;
+        }
+        view[12] = -(g_camPos[0] * r[0] + g_camPos[1] * r[1] + g_camPos[2] * r[2]);
+        view[13] = -(g_camPos[0] * u[0] + g_camPos[1] * u[1] + g_camPos[2] * u[2]);
+        view[14] = -(g_camPos[0] * f[0] + g_camPos[1] * f[1] + g_camPos[2] * f[2]);
+        view[15] = 1; world[3] = world[7] = world[11] = 0; world[15] = 1;
+    }
+}
+
+// peek/poke: EXPR = [*]ADDR[+OFF]; ADDR hex, "i:" prefix = Condor.exe (IDA/Ghidra) address; leading '*' = read the 32 bit
+// value at ADDR first (follow a pointer), then add OFF.
+static uintptr_t ResolveExpr(const char* e) {
+    uintptr_t base; int deref = 0; unsigned long off = 0; const char* plus;
+    if (*e == '*') { deref = 1; e++; }
+    if (e[0] == 'i' && e[1] == ':') { e += 2; base = (uintptr_t)IdaAddrToRuntime((uintptr_t)strtoul(e, NULL, 16)); }
+    else base = (uintptr_t)strtoul(e, NULL, 16);
+    plus = strchr(e, '+'); if (plus) off = strtoul(plus + 1, NULL, 16);
+    if (deref) { uint32_t v = 0; if (!Rd32(base, &v)) return 0; base = v; }
+    return base + off;
+}
+static void DoPeek(const char* expr, int len) {
+    uintptr_t a = ResolveExpr(expr); int i;
+    if (!a || len < 4 || len > 4096 || IsBadReadPtr((void*)a, len)) { RLog("peek %s: unreadable (%p)", expr, (void*)a); return; }
+    RLog("peek %s = %p", expr, (void*)a);
+    for (i = 0; i < len; i += 16) {
+        const float* f = (const float*)(a + i); const uint32_t* u = (const uint32_t*)(a + i);
+        int n = (len - i >= 16) ? 4 : (len - i) / 4;
+        char line[200]; int o = _snprintf(line, sizeof line, "  +%03x:", i), k;
+        for (k = 0; k < n; k++) {
+            float v = f[k];
+            if (u[k] != 0 && fabsf(v) > 1e-6f && fabsf(v) < 1e7f) o += _snprintf(line + o, sizeof line - o, " %12.5g", v);
+            else o += _snprintf(line + o, sizeof line - o, " %12s", u[k] ? "." : "0");
+            o += _snprintf(line + o, sizeof line - o, "(%08x)", u[k]);
+        }
+        RLog("%s", line);
+    }
+}
+static void DoPoke(const char* expr, float v) {
+    uintptr_t a = ResolveExpr(expr);
+    if (!a || IsBadWritePtr((void*)a, 4)) { RLog("poke %s: not writable", expr); return; }
+    *(volatile float*)a = v; RLog("poke %s = %g", expr, v);
+}
+
+// scan X Y Z [TOL]: find three consecutive floats near X,Y,Z in the process' writable memory (to find object positions)
+static void DoScan(float x, float y, float z, float tol) {
+    MEMORY_BASIC_INFORMATION mbi; uintptr_t a = 0x10000; int hits = 0;
+    while (a < 0x7ff00000 && hits < 40) {
+        if (!VirtualQuery((void*)a, &mbi, sizeof mbi)) break;
+        if (mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)) && !(mbi.Protect & PAGE_GUARD)) {
+            const float* f = (const float*)mbi.BaseAddress; size_t n = mbi.RegionSize / 4, i;
+            for (i = 0; i + 2 < n && hits < 40; i++)
+                if (fabsf(f[i] - x) < tol && fabsf(f[i + 1] - y) < tol && fabsf(f[i + 2] - z) < tol) {
+                    RLog("scan hit %p: %.3f %.3f %.3f", (void*)&f[i], f[i], f[i + 1], f[i + 2]); hits++;
+                }
+        }
+        a = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    }
+    RLog("scan done, %d hits", hits);
+}
+
+// scand X Y Z [TOL]: same as scan, for three consecutive doubles
+static void DoScanD(double x, double y, double z, double tol) {
+    MEMORY_BASIC_INFORMATION mbi; uintptr_t a = 0x10000; int hits = 0;
+    while (a < 0x7ff00000 && hits < 40) {
+        if (!VirtualQuery((void*)a, &mbi, sizeof mbi)) break;
+        if (mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)) && !(mbi.Protect & PAGE_GUARD)) {
+            const double* f = (const double*)mbi.BaseAddress; size_t n = mbi.RegionSize / 8, i;
+            for (i = 0; i + 2 < n && hits < 40; i++)
+                if (fabs(f[i] - x) < tol && fabs(f[i + 1] - y) < tol && fabs(f[i + 2] - z) < tol) {
+                    RLog("scand hit %p: %.4f %.4f %.4f", (void*)&f[i], f[i], f[i + 1], f[i + 2]); hits++;
+                }
+        }
+        a = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    }
+    RLog("scand done, %d hits", hits);
+}
+
+// real (injected) keyboard / mouse-look: keybd_event reaches the game like a physical key press
+static void InjKey(int vk, int down) {
+    keybd_event((BYTE)vk, (BYTE)MapVirtualKeyA(vk, 0), down ? 0 : KEYEVENTF_KEYUP, 0);
+}
+static void DoMouseDrag(int dx, int dy) {      // hold the left button in the middle of the game window and move by dx,dy
+    POINT o = {0, 0}; RECT r; int i, cx, cy;
+    if (!g_main) return;
+    GetClientRect(g_main, &r); ClientToScreen(g_main, &o);
+    cx = o.x + r.right / 2; cy = o.y + r.bottom / 2;
+    SetCursorPos(cx, cy); Sleep(100);
+    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0); Sleep(100);
+    for (i = 1; i <= 20; i++) { SetCursorPos(cx + dx * i / 20, cy + dy * i / 20); Sleep(25); }
+    Sleep(100); mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+    RLog("mouse drag %d,%d", dx, dy);
+}
 static void LogState(void) {
     uint32_t sp = 0, len = 0; char txt[128] = "";
     static unsigned lastFrames = 0; unsigned f = g_frames;
@@ -311,6 +440,32 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
             if (!_stricmp(c, "windows")) { g_main = NULL; EnumWindows(EnumW, 1); }
             else if (!_stricmp(c, "click")) { sscanf(lines[i], "%*s %d %d", &x, &y); DoClick(x, y); }
             else if (!_stricmp(c, "state")) LogState();
+            else if (!_stricmp(c, "cam")) {     // cam off | here | X Y Z YAW PITCH
+                float v[5] = {0}; int nn;
+                if (!_stricmp(a, "off")) { g_camFree = 0; RLog("cam: engine camera"); }
+                else if (!_stricmp(a, "here")) { g_camLatch = 1; g_camFree = 1; Sleep(300); }
+                else if ((nn = sscanf(lines[i], "%*s %f %f %f %f %f", &v[0], &v[1], &v[2], &v[3], &v[4])) >= 3) {
+                    if (!g_camFree) { g_camLatch = 1; Sleep(300); g_camFree = 1; }
+                    g_camPos[0] = v[0]; g_camPos[1] = v[1]; g_camPos[2] = v[2]; if (nn >= 4) g_camYaw = v[3]; if (nn >= 5) g_camPitch = v[4];
+                    RLog("cam: pos %.1f %.1f %.1f yaw %.1f pitch %.1f", g_camPos[0], g_camPos[1], g_camPos[2], g_camYaw, g_camPitch);
+                }
+            }
+            else if (!_stricmp(c, "camrel")) {  // camrel FWD RIGHT UP DYAW DPITCH (metres / degrees, relative to the current free camera)
+                float v[5] = {0}, y; sscanf(lines[i], "%*s %f %f %f %f %f", &v[0], &v[1], &v[2], &v[3], &v[4]);
+                if (!g_camFree) { g_camLatch = 1; Sleep(300); g_camFree = 1; }
+                y = g_camYaw * 0.0174533f;
+                g_camPos[0] += sinf(y) * v[0] + cosf(y) * v[1]; g_camPos[1] += cosf(y) * v[0] - sinf(y) * v[1]; g_camPos[2] += v[2];
+                g_camYaw += v[3]; g_camPitch += v[4];
+                RLog("cam: pos %.1f %.1f %.1f yaw %.1f pitch %.1f", g_camPos[0], g_camPos[1], g_camPos[2], g_camYaw, g_camPitch);
+            }
+            else if (!_stricmp(c, "scan")) { float v[4] = {0, 0, 0, 2.0f}; sscanf(lines[i], "%*s %f %f %f %f", &v[0], &v[1], &v[2], &v[3]); DoScan(v[0], v[1], v[2], v[3]); }
+            else if (!_stricmp(c, "scand")) { float v[4] = {0, 0, 0, 2.0f}; sscanf(lines[i], "%*s %f %f %f %f", &v[0], &v[1], &v[2], &v[3]); DoScanD(v[0], v[1], v[2], v[3]); }
+            else if (!_stricmp(c, "kkey")) { int vk = KeyVk(a); if (cnt < 1) cnt = 1; for (k = 0; k < cnt; k++) { InjKey(vk, 1); Sleep(80); InjKey(vk, 0); Sleep(150); } RLog("injected key %s", a); }
+            else if (!_stricmp(c, "kdown")) InjKey(KeyVk(a), 1);
+            else if (!_stricmp(c, "kup")) InjKey(KeyVk(a), 0);
+            else if (!_stricmp(c, "mdrag")) { sscanf(lines[i], "%*s %d %d", &x, &y); DoMouseDrag(x, y); }
+            else if (!_stricmp(c, "peek")) DoPeek(a, cnt > 0 && cnt != 1 ? cnt : 64);
+            else if (!_stricmp(c, "poke")) { float fv = 0; sscanf(lines[i], "%*s %*s %f", &fv); DoPoke(a, fv); }
             else if (!_stricmp(c, "shot")) { CreateDirectoryA(g_dir, NULL); { char d2[MAX_PATH]; _snprintf(d2, sizeof d2, "%s\\shots", g_dir); CreateDirectoryA(d2, NULL); _snprintf(g_shot, sizeof g_shot, "%s\\%s.bin", d2, a); } RLog("shot requested: %s", g_shot); }
             else if (!_stricmp(c, "mclick")) { sscanf(lines[i], "%*s %d %d", &x, &y); DoMouseClick(x, y); }
             else if (!_stricmp(c, "key")) { int vk = KeyVk(a); if (cnt < 1) cnt = 1; for (k = 0; k < cnt; k++) { KeyMsg(vk, 1); Sleep(60); KeyMsg(vk, 0); Sleep(120); } }
@@ -343,5 +498,6 @@ void InstallPostFX(void) {
     DBGLOG("postfx: hook on HUD draw (%p) -> %s (%d)", target, r == 0 ? "OK" : "FAILED", r);
     if (g_logf) { fprintf(g_logf, "postfx: hook on HUD draw %p -> %d\n", target, r); fflush(g_logf); }
     (void)r; (void)target;
+    // ScenePre is not installed: instrumenting 0x73B59C crashes the game while loading a flight (see git log)
     CreateThread(NULL, 0, RemoteThread, NULL, 0, NULL);
 }
