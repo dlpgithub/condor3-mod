@@ -349,6 +349,16 @@ static void DoPoke(const char* expr, float v) {
     *(volatile float*)a = v; RLog("poke %s = %g", expr, v);
 }
 
+// move DX DY DZ: offset the glider's world position (doubles at obj+0x6d8/0x6e0/0x6e8, integrated by FUN_00706988).
+static void DoMove(double dx, double dy, double dz) {
+    uint32_t pp = 0, obj = 0; double* p; double d[3]; d[0] = dx; d[1] = dy; d[2] = dz;
+    if (!Rd32((uintptr_t)IdaAddrToRuntime(0x792a64), &pp) || !pp || !Rd32(pp, &obj) || !obj) { RLog("move: no glider object"); return; }
+    p = (double*)(obj + 0x6d8);
+    if (IsBadWritePtr(p, 24)) { RLog("move: bad ptr"); return; }
+    p[0] += d[0]; p[1] += d[1]; p[2] += d[2];
+    RLog("move: obj %08x pos now %.2f %.2f %.2f", obj, p[0], p[1], p[2]);
+}
+
 // scan X Y Z [TOL]: find three consecutive floats near X,Y,Z in the process' writable memory (to find object positions)
 static void DoScan(float x, float y, float z, float tol) {
     MEMORY_BASIC_INFORMATION mbi; uintptr_t a = 0x10000; int hits = 0;
@@ -397,6 +407,46 @@ static void DoMouseDrag(int dx, int dy) {      // hold the left button in the mi
     for (i = 1; i <= 20; i++) { SetCursorPos(cx + dx * i / 20, cy + dy * i / 20); Sleep(25); }
     Sleep(100); mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
     RLog("mouse drag %d,%d", dx, dy);
+}
+
+// ---- software write watchpoint (PAGE_GUARD + vectored exception handler) --------------------------------------
+// watch ADDR LEN: logs the code address (EIP) of every write into [ADDR, ADDR+LEN) until `unwatch`. Used to find the engine code
+// that computes a value (e.g. the glider's world matrix).
+static volatile uintptr_t g_wAddr = 0, g_wLen = 0, g_wPage = 0; static volatile int g_wRearm = 0;
+static uintptr_t g_wSeen[64]; static int g_wSeenN = 0; static volatile long g_wHits = 0;
+static LONG CALLBACK WatchVeh(EXCEPTION_POINTERS* ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code == STATUS_GUARD_PAGE_VIOLATION && g_wPage) {
+        uintptr_t a = (uintptr_t)ep->ExceptionRecord->ExceptionInformation[1], eip = (uintptr_t)ep->ContextRecord->Eip;
+        if ((a & ~0xFFFu) == g_wPage) {
+            if (ep->ExceptionRecord->ExceptionInformation[0] == 1 && a >= g_wAddr && a < g_wAddr + g_wLen) {
+                int i, seen = 0;
+                InterlockedIncrement(&g_wHits);
+                for (i = 0; i < g_wSeenN; i++) if (g_wSeen[i] == eip) seen = 1;
+                if (!seen && g_wSeenN < 64) { g_wSeen[g_wSeenN++] = eip; RLog("watch: write to %p from code %p (ida %p) esp=%p", (void*)a, (void*)eip, (void*)(eip - (uintptr_t)IdaAddrToRuntime(0x400000) + 0x400000), (void*)ep->ContextRecord->Esp); }
+            }
+            g_wRearm = 1; ep->ContextRecord->EFlags |= 0x100;     // single step, then re-arm
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
+    if (code == EXCEPTION_SINGLE_STEP && g_wRearm) {
+        DWORD old; g_wRearm = 0;
+        if (g_wPage) VirtualProtect((void*)g_wPage, 0x1000, PAGE_READWRITE | PAGE_GUARD, &old);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static void DoWatch(uintptr_t addr, int len) {
+    static int vehAdded = 0; DWORD old;
+    if (!vehAdded) { AddVectoredExceptionHandler(1, WatchVeh); vehAdded = 1; }
+    g_wSeenN = 0; g_wHits = 0; g_wAddr = addr; g_wLen = len; g_wPage = addr & ~0xFFFu;
+    VirtualProtect((void*)g_wPage, 0x1000, PAGE_READWRITE | PAGE_GUARD, &old);
+    RLog("watch armed on page %p for [%p, +%d)", (void*)g_wPage, (void*)addr, len);
+}
+static void DoUnwatch(void) {
+    DWORD old; uintptr_t pg = g_wPage; g_wPage = 0;
+    if (pg) VirtualProtect((void*)pg, 0x1000, PAGE_READWRITE, &old);
+    RLog("watch off, %ld writes seen, %d distinct writers", g_wHits, g_wSeenN);
 }
 static void LogState(void) {
     uint32_t sp = 0, len = 0; char txt[128] = "";
@@ -464,7 +514,10 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
             else if (!_stricmp(c, "kdown")) InjKey(KeyVk(a), 1);
             else if (!_stricmp(c, "kup")) InjKey(KeyVk(a), 0);
             else if (!_stricmp(c, "mdrag")) { sscanf(lines[i], "%*s %d %d", &x, &y); DoMouseDrag(x, y); }
+            else if (!_stricmp(c, "watch")) DoWatch(ResolveExpr(a), cnt > 1 ? cnt : 64);
+            else if (!_stricmp(c, "unwatch")) DoUnwatch();
             else if (!_stricmp(c, "peek")) DoPeek(a, cnt > 0 && cnt != 1 ? cnt : 64);
+            else if (!_stricmp(c, "move")) { double m[3] = {0, 0, 0}; sscanf(lines[i], "%*s %lf %lf %lf", &m[0], &m[1], &m[2]); DoMove(m[0], m[1], m[2]); }
             else if (!_stricmp(c, "poke")) { float fv = 0; sscanf(lines[i], "%*s %*s %f", &fv); DoPoke(a, fv); }
             else if (!_stricmp(c, "shot")) { CreateDirectoryA(g_dir, NULL); { char d2[MAX_PATH]; _snprintf(d2, sizeof d2, "%s\\shots", g_dir); CreateDirectoryA(d2, NULL); _snprintf(g_shot, sizeof g_shot, "%s\\%s.bin", d2, a); } RLog("shot requested: %s", g_shot); }
             else if (!_stricmp(c, "mclick")) { sscanf(lines[i], "%*s %d %d", &x, &y); DoMouseClick(x, y); }
