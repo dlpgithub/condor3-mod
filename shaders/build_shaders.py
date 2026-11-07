@@ -78,6 +78,9 @@ def common_block(o):
         "shadow_strength": "%.4f" % o["shadow_strength"],
         "warm_sun": "%.4f" % o["warm_sun"],
         "cool_ambient": "%.4f" % o["cool_ambient"],
+        "hemi_ambient": "%.4f" % o["hemi_ambient"],
+        "sun_gain": "%.4f" % o["sun_gain"],
+        "amb_gain": "%.4f" % o["amb_gain"],
         "water_glint": "%.4f" % o["water_glint"],
     }
     for k, v in vals.items():

@@ -9,6 +9,9 @@
 #define MOD_SHADOW       @shadow_strength@
 #define MOD_WARM         @warm_sun@
 #define MOD_COOL         @cool_ambient@
+#define MOD_HEMI         @hemi_ambient@
+#define MOD_SUN_GAIN     @sun_gain@
+#define MOD_AMB_GAIN     @amb_gain@
 
 // Warm direct sunlight / cool sky-lit shadows (the original lights everything with one neutral tint).
 float4 ModSun(float4 sun) { return float4(sun.rgb * float3(1.0 + MOD_WARM, 1.0, 1.0 - MOD_WARM * 1.4), sun.a); }
@@ -51,3 +54,20 @@ float3 ModSkyColor(float3 look, float3 fogColor, float3 sunColor, float3 sunPos)
     return baseColor + f * (sunColor - baseColor);
 }
 
+
+// Lighting in linear space with a sky/ground hemisphere ambient.
+//   tex      : albedo as stored (sRGB-ish), n : surface normal (z up), sundot : N.L (signed),
+//   directK  : 0..1 factor applied to the DIRECT light only (shadows); ambient is never shadowed.
+// Returns display-space (gamma encoded) colour.
+float3 ModLit(float3 tex, float4 sunC, float4 ambC, float sundot, float3 n, float directK)
+{
+    float3 a  = pow(saturate(tex), 2.2);
+    float3 sl = pow(saturate(sunC.rgb), 2.2) * MOD_SUN_GAIN;
+    float3 al = pow(saturate(ambC.rgb), 2.2) * MOD_AMB_GAIN;
+    float hemi = saturate(n.z * 0.5 + 0.5);
+    float3 skyA = al * float3(0.92, 1.0, 1.14);
+    float3 gndA = al * float3(0.50, 0.46, 0.40);
+    float3 amb = lerp(al, lerp(gndA, skyA, hemi) * 1.25, MOD_HEMI);
+    float3 c = a * (sl * saturate(sundot) * directK + amb);
+    return pow(saturate(c), 1.0 / 2.2);
+}

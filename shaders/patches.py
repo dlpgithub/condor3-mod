@@ -66,7 +66,7 @@ def patch_land(src, o):
 
     # [MOD] stronger shadows + warm sun / cool ambient
     src = rep(src, "float TotalShadow = 0.6 + 0.4 * min(min(min(CloudShadow, shadowFactor), shadowFactorAvion), shadowFactorTowplane);",
-              "float TotalShadow = (1.0 - MOD_SHADOW) + MOD_SHADOW * min(min(min(CloudShadow, shadowFactor), shadowFactorAvion), shadowFactorTowplane);", what="Land: shadow")
+              "float ModS = min(min(min(CloudShadow, shadowFactor), shadowFactorAvion), shadowFactorTowplane);\n\tfloat TotalShadow = (1.0 - MOD_SHADOW) + MOD_SHADOW * ModS;\n\tfloat3 ModN = (RealtimeShading == true) ? normalize(input.Norm) : float3(0, 0, 1);", what="Land: shadow")
     src = rep(src, "float4 LightingColor = saturate(SunColor * sundot + AmbientColor);",
               "float4 LightingColor = saturate(ModSun(SunColor) * sundot + ModAmb(AmbientColor));", what="Land: light tint")
 
@@ -80,11 +80,16 @@ def patch_land(src, o):
             "\tif (MapView == false)\n"
             "\t  { ModFog = saturate(1.1 * exp(-0.000000001 * dot(ModLook, ModLook)) - 0.1); }\n"
             "\tfloat3 ModSky = ModSkyColor(normalize(ModLook), FogColor.xyz, SunColor.xyz, SunPos);\n"
-            "\tfloat4 ModOut = lerp(float4(ModSky, 0), saturate(LightingColor * TotalShadow * TextureColor), ModFog);\n"
+            "\tfloat4 ModOut = lerp(float4(ModSky, 0), LITEXPR, ModFog);\n"
             "\tModOut.rgb = ModGrade(ModOut.rgb) + ModDither(input.Pos.xy);\n"
             "\treturn ModOut;")
     else:
         new = "return ModGradeA(%s);" % old[len("return "):-1]
+    if o.get("linear_light", 0):
+        lit = "float4(ModLit(TextureColor.rgb, ModSun(SunColor), ModAmb(AmbientColor), sundot, ModN, TotalShadow), 1)"
+    else:
+        lit = "saturate(LightingColor * TotalShadow * TextureColor)"
+    new = new.replace("LITEXPR", lit)
     return rep(src, old, new, what="Land: final colour")
 
 

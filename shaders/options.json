@@ -17,5 +17,10 @@
 
   "shadow_strength": 0.62,
   "warm_sun": 0.10,
-  "cool_ambient": 0.08
+  "cool_ambient": 0.08,
+
+  "linear_light": 1,
+  "hemi_ambient": 0.7,
+  "sun_gain": 1.10,
+  "amb_gain": 0.70
 }
