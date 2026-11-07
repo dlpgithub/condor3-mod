@@ -10,18 +10,21 @@
 // ---------------------------------------------------------------- tweakables
 #define EXPOSURE         1.00    // linear brightness multiplier (1 = unchanged)
 #define SHOULDER         0.72    // highlights above this brightness are compressed softly instead of clipping
-#define CONTRAST         0.38    // 0 = off. S-curve in display space: deeper shadows, brighter lights
-#define SATURATION       1.14    // 1 = unchanged
-#define BLOOM_STRENGTH   0.20    // glow around bright areas (sun, clouds, water glints)
+#define CONTRAST         0.28    // 0 = off. S-curve in display space: deeper shadows, brighter lights
+#define SATURATION       1.06    // 1 = unchanged
+#define BLOOM_STRENGTH   0.16    // glow around bright areas (sun, clouds, water glints)
 #define BLOOM_THRESHOLD  0.55    // linear brightness where glow starts
-#define AO_STRENGTH      1.80    // 0 = off. Darkens creases, tree bases, building edges
-#define AO_RADIUS        8.0     // metres
+#define AO_STRENGTH      0.90    // 0 = off. Darkens creases, tree bases, building edges
+#define AO_RADIUS        3.0     // metres
 #define AO_FADE_NEAR     1500.0  // metres: AO starts fading ...
 #define AO_FADE_FAR      6000.0  //         ... and is gone here
-#define SHARPEN          0.55    // local contrast / detail (0 = off)
-#define VIGNETTE         0.18
-#define HAZE_STRENGTH    0.55    // extra blue depth separation of far terrain
+#define SHARPEN          0.35    // local contrast / detail (0 = off)
+#define VIGNETTE         0.12
+#define HAZE_STRENGTH    0.30    // extra blue depth separation of far terrain
 #define HAZE_DISTANCE    30000.0 // metres
+#define SKY_SATURATION   1.30    // sky only: deeper blue
+#define SKY_DARKEN       0.94    // sky only: slight darkening, richer blue
+#define HAZE_COLOR       float3(0.40, 0.56, 0.80)  // linear colour distant terrain fades into (horizon blue)
 #define DITHER           1.0     // removes banding in smooth gradients
 #define DEBUG_VIEW       0       // 1 = ambient occlusion only, 2 = depth (metres/2000), 3 = bloom only
 
@@ -38,10 +41,8 @@ cbuffer CB : register(b0)
 Texture2D g_t0 : register(t0);
 #if DEPTH_MS
 Texture2DMS<float4> g_depth : register(t1);
-Texture2DMS<float4> g_world : register(t6);
 #else
 Texture2D<float4> g_depth : register(t1);
-Texture2D<float4> g_world : register(t6);
 #endif
 Texture2D g_t2 : register(t2);
 Texture2D g_t3 : register(t3);
@@ -67,9 +68,9 @@ float LoadDepth(int2 p)
 {
     p = clamp(p, int2(0, 0), int2(g_screen.xy) - 1);
 #if DEPTH_MS
-    return max(g_depth.Load(p, 0).x, g_world.Load(p, 0).x);
+    return g_depth.Load(p, 0).x;
 #else
-    return max(g_depth.Load(int3(p, 0)).x, g_world.Load(int3(p, 0)).x);
+    return g_depth.Load(int3(p, 0)).x;
 #endif
 }
 
@@ -229,9 +230,16 @@ float4 PS_Final(VSO i) : SV_Target
         float fade = 1.0 - saturate((z - AO_FADE_NEAR) / (AO_FADE_FAR - AO_FADE_NEAR));
         lin *= lerp(1.0, ao, AO_STRENGTH * fade);
 
-        float t = 1.0 - exp(-z / HAZE_DISTANCE);
-        float3 shifted = lin * float3(0.80, 0.92, 1.10) + float3(0.055, 0.068, 0.090) * 0.6;
-        lin = lerp(lin, shifted, saturate(t * HAZE_STRENGTH));
+        // aerial perspective: distant terrain loses contrast/saturation and fades towards the horizon blue
+        float t = saturate((1.0 - exp(-z / HAZE_DISTANCE)) * HAZE_STRENGTH * 1.0);
+        float lz = dot(lin, LUMA);
+        float3 faded = lerp(float3(lz, lz, lz), lin, 1.0 - 0.45 * t);
+        lin = lerp(faded, HAZE_COLOR * (0.55 + 0.9 * lz), t * 0.75);
+    }
+    else
+    {
+        float ls0 = dot(lin, LUMA);
+        lin = lerp(float3(ls0, ls0, ls0), lin, SKY_SATURATION) * float3(SKY_DARKEN, SKY_DARKEN * 1.01, 1.02);
     }
 
     float3 bloom = g_t2.SampleLevel(g_lin, uv, 0).rgb * 0.45
