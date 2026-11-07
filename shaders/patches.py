@@ -81,10 +81,10 @@ def patch_land(src, o):
             "\t  { ModFog = saturate(1.1 * exp(-0.000000001 * dot(ModLook, ModLook)) - 0.1); }\n"
             "\tfloat3 ModSky = ModSkyColor(normalize(ModLook), FogColor.xyz, SunColor.xyz, SunPos);\n"
             "\tfloat4 ModOut = lerp(float4(ModSky, 0), LITEXPR, ModFog);\n"
-            "\tModOut.rgb = ModGradeH(ModOut.rgb) + ModDither(input.Pos.xy);\n"
+            "\tModOut.rgb = ModGrade(ModOut.rgb) + ModDither(input.Pos.xy);\n"
             "\treturn ModOut;")
     else:
-        new = "return ModGradeAH(%s);" % old[len("return "):-1]
+        new = "return ModGradeA(%s);" % old[len("return "):-1]
     if o.get("linear_light", 0):
         lit = "float4(ModLit(TextureColor.rgb, ModSun(SunColor), ModAmb(AmbientColor), sundot, ModN, TotalShadow), 1)"
     else:
@@ -133,7 +133,7 @@ def patch_autoobjects(src, o):
                                "\toutput.SkyColor.rgb = ModSkyColor(LookVec, FogColor.xyz, SunColor.xyz, SunPos);",
                      what="AutoObjects: haze")
     return rep(src, "return lerp(input.SkyColor, FinalColor, input.fogFactor);",
-               "return ModGradeAH(lerp(input.SkyColor, FinalColor, input.fogFactor));",
+               "return ModGradeA(lerp(input.SkyColor, FinalColor, input.fogFactor));",
                what="AutoObjects: grade")
 
 
@@ -149,7 +149,7 @@ def patch_grass(src, o):
         src = rep(src, "float4 OutputColor = float4(input.Color.rgb * (TexColor.rgb + 0.5) * LightingColor * TotalShadow, TexColor.a);",
                   "float4 OutputColor = float4(ModLit(input.Color.rgb * (TexColor.rgb + 0.5), ModSun(SunColor), ModAmb(AmbientColor), sundot, float3(0, 0, 1), TotalShadow), TexColor.a);",
                   what="Grass: linear light")
-    return rep(src, "return OutputColor;", "return ModGradeAH(OutputColor);", what="Grass: grade")
+    return rep(src, "return OutputColor;", "return ModGradeA(OutputColor);", what="Grass: grade")
 
 
 # --------------------------------------------------------------------------
@@ -183,12 +183,11 @@ def patch_middle_clouds(src, o):
 
 
 def patch_high_clouds(src, o):
-    src = rep(src, "float4(SunColor.xyz, Alpha)", "float4(SunColor.xyz * MOD_SUN_DISC, Alpha)", what="HighClouds: sun disc")
     if o["anisotropy"] > 1:
         src = rep(src, "Filter = ANISOTROPIC;",
                   "Filter = ANISOTROPIC;\n    MaxAnisotropy = %d;" % o["anisotropy"],
                   what="HighClouds: anisotropy")
-    return wrap_returns(src, r"return (txDiffuse\.Sample\( samLinear, input\.Tex \) \* float4\(SunColor\.xyz \* MOD_SUN_DISC, Alpha\));",
+    return wrap_returns(src, r"return (txDiffuse\.Sample\( samLinear, input\.Tex \) \* float4\(SunColor\.xyz, Alpha\));",
                         1, "HighClouds: grade")
 
 

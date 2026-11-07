@@ -22,7 +22,6 @@ typedef struct PfxCamera {
     float view[16];             // engine View matrix as laid out in the HLSL constant buffer (column major)
     float camPos[4];            // world position, w = valid flag
     float fog[4], sunDir[4], sunColor[4], amb[4];
-    int bypass;                 // 1: just copy the (HDR) scene to the output, clamped (postfx switched off)
 } PfxCamera;
 
 typedef struct PfxCore PfxCore;

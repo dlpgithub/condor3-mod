@@ -2,14 +2,6 @@
 // Condor 3 shader mod - shared helpers (inserted by build_shaders.py)
 // ============================================================================
 #define MOD_SATURATION   @saturation@
-#define MOD_HDR          @hdr@
-#define MOD_SUN_DISC     @sun_disc@
-// With the HDR scene target (postfx hdr on) shaders may output values above 1: the post-processing tone maps them.
-#if MOD_HDR
-#define MOD_SAT(x)  max(x, 0.0)
-#else
-#define MOD_SAT(x)  saturate(x)
-#endif
 #define MOD_CURVE        @curve@
 #define MOD_DITHER       @dither@
 #define MOD_MACRO_DETAIL @macro_detail@
@@ -28,20 +20,19 @@ float4 ModAmb(float4 amb) { return float4(amb.rgb * float3(1.0 - MOD_COOL, 1.0, 
 // Gentle colour grade: saturation + a soft S-curve for contrast.
 // Applied to everything that ends up on screen *together* (terrain, sky,
 // clouds, trees, aircraft) so haze and fog colours keep matching each other.
-float3 ModGradeX(float3 c, bool hdr)
+float3 ModGrade(float3 c)
 {
-    c = hdr ? max(c, 0.0) : saturate(c);
+    c = saturate(c);
     float l = dot(c, float3(0.299, 0.587, 0.114));
-    c = lerp(float3(l, l, l), c, MOD_SATURATION);
-    c = hdr ? max(c, 0.0) : saturate(c);
-    float3 s = saturate(c);
-    s = s * s * (3.0 - 2.0 * s);
-    return hdr ? c : lerp(c, s, MOD_CURVE);
+    c = saturate(lerp(float3(l, l, l), c, MOD_SATURATION));
+    float3 s = c * c * (3.0 - 2.0 * c);
+    return lerp(c, s, MOD_CURVE);
 }
-float3 ModGrade(float3 c)  { return ModGradeX(c, false); }                 // sky, clouds, aircraft: stay in 0..1
-float3 ModGradeH(float3 c) { return ModGradeX(c, MOD_HDR != 0); }          // terrain, trees, grass: may exceed 1 with the HDR target
-float4 ModGradeA(float4 c)  { return float4(ModGrade(c.rgb), c.a); }
-float4 ModGradeAH(float4 c) { return float4(ModGradeH(c.rgb), c.a); }
+
+float4 ModGradeA(float4 c)
+{
+    return float4(ModGrade(c.rgb), c.a);
+}
 
 // Interleaved-gradient noise, +-0.5 LSB. Removes banding in sky gradients.
 float ModDither(float2 p)
@@ -78,5 +69,5 @@ float3 ModLit(float3 tex, float4 sunC, float4 ambC, float sundot, float3 n, floa
     float3 gndA = al * float3(0.50, 0.46, 0.40);
     float3 amb = lerp(al, lerp(gndA, skyA, hemi) * 1.25, MOD_HEMI);
     float3 c = a * (sl * saturate(sundot) * directK + amb);
-    return pow(MOD_SAT(c), 1.0 / 2.2);
+    return pow(saturate(c), 1.0 / 2.2);
 }

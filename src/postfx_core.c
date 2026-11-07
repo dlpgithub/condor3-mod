@@ -60,7 +60,7 @@ struct PfxCore {
     ID3D11BlendState* bs;
     ID3D11Buffer* cb;
 
-    UINT w, h; DXGI_FORMAT sceneFmt;
+    UINT w, h;
     Target scene, ao, aoBlur, lv[LEVELS], tmp[LEVELS], capDepth;
 
     ID3D11Texture2D* depthTex;          // cached depth view
@@ -191,10 +191,10 @@ static int MakeTarget(PfxCore* c, Target* t, UINT w, UINT h, DXGI_FORMAT fmt) {
     return 1;
 }
 
-static int EnsureSize(PfxCore* c, UINT w, UINT h, DXGI_FORMAT fmt) {
+static int EnsureSize(PfxCore* c, UINT w, UINT h) {
     int i, ok = 1;
-    if (c->w == w && c->h == h && c->scene.tex && c->sceneFmt == fmt) return 1;
-    ok &= MakeTarget(c, &c->scene, w, h, fmt);
+    if (c->w == w && c->h == h && c->scene.tex) return 1;
+    ok &= MakeTarget(c, &c->scene, w, h, DXGI_FORMAT_R8G8B8A8_UNORM);
     ok &= MakeTarget(c, &c->ao, w, h, DXGI_FORMAT_R8_UNORM);
     ok &= MakeTarget(c, &c->aoBlur, w, h, DXGI_FORMAT_R8_UNORM);
     for (i = 0; i < LEVELS; i++) {
@@ -203,8 +203,8 @@ static int EnsureSize(PfxCore* c, UINT w, UINT h, DXGI_FORMAT fmt) {
     }
     ReleaseTarget(&c->capDepth);
     if (!ok) { PfxLog("postfx: creating render targets for %ux%u failed", w, h); return 0; }
-    c->w = w; c->h = h; c->sceneFmt = fmt;
-    PfxLog("postfx: render targets created for %ux%u (scene format %d)", w, h, (int)fmt);
+    c->w = w; c->h = h;
+    PfxLog("postfx: render targets created for %ux%u", w, h);
     return 1;
 }
 
@@ -516,7 +516,7 @@ int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* x, ID3D11Texture2D* color, ID3D
 
     if (!c || c->failed || !color || !colorRTV || !depth || !cam) return 0;
     ID3D11Texture2D_GetDesc(color, &cd);
-    if (cd.Format != DXGI_FORMAT_R8G8B8A8_UNORM && cd.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
+    if (cd.Format != DXGI_FORMAT_R8G8B8A8_UNORM) {
         PfxLog("postfx: unexpected colour format %d - disabling", (int)cd.Format);
         c->failed = 1;
         return 0;
@@ -535,7 +535,7 @@ int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* x, ID3D11Texture2D* color, ID3D
     if (!c->vs || c->shaderMS != depthMS) {
         if (!BuildShaders(c, depthMS) && !c->vs) return 0;   // nothing usable yet; retry after the file changes
     }
-    if (!EnsureSize(c, cd.Width, cd.Height, cd.Format)) { c->failed = 1; return 0; }
+    if (!EnsureSize(c, cd.Width, cd.Height)) { c->failed = 1; return 0; }
 
     SaveState(x, &st);
 
@@ -562,11 +562,10 @@ int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* x, ID3D11Texture2D* color, ID3D
 
     // 1) colour -> single sample scene copy
     if (cd.SampleDesc.Count > 1)
-        ID3D11DeviceContext_ResolveSubresource(x, (ID3D11Resource*)c->scene.tex, 0, (ID3D11Resource*)color, 0, cd.Format);
+        ID3D11DeviceContext_ResolveSubresource(x, (ID3D11Resource*)c->scene.tex, 0, (ID3D11Resource*)color, 0, DXGI_FORMAT_R8G8B8A8_UNORM);
     else
         ID3D11DeviceContext_CopyResource(x, (ID3D11Resource*)c->scene.tex, (ID3D11Resource*)color);
 
-    if (c->capture && c->sceneFmt != DXGI_FORMAT_R8G8B8A8_UNORM) c->capture = 0;   // offline capture is 8 bit only
     if (c->capture) {
         c->capture = 0;
         if (!c->capDepth.tex) MakeTarget(c, &c->capDepth, c->w, c->h, DXGI_FORMAT_R32_FLOAT);
@@ -605,7 +604,7 @@ int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* x, ID3D11Texture2D* color, ID3D
     s[0] = c->scene.srv; s[1] = c->depthSrv; s[6] = worldSrv;
     s[2] = c->lv[0].srv; s[3] = c->lv[1].srv; s[4] = c->lv[2].srv;
     s[5] = c->aoBlur.srv;
-    DrawPass(c, x, cam, colorRTV, c->w, c->h, c->psFinal, s, 0, 0, 0, cam->bypass ? 1.0f : 0.0f);
+    DrawPass(c, x, cam, colorRTV, c->w, c->h, c->psFinal, s, 0, 0, 0, 0);
 
     RestoreState(x, &st);
     return 1;
