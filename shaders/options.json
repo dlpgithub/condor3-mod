@@ -19,11 +19,12 @@
   "amb_gain": 0.7,
   "cloud_shade": 0.35,
   "cloud_silver": 0.9,
-  "aircraft_gamma": 0.85,
-  "aircraft_gain": 1.3,
+  "aircraft_gamma": 0.7,
+  "aircraft_gain": 1.0,
   "highlight_knee": 0.72,
   "cloud_gain": 0.97,
-  "aircraft_ambient": 0.78,
-  "cockpit_gain": 0.55,
-  "aircraft_fresnel": 0.35
+  "aircraft_ambient": 1.0,
+  "cockpit_gain": 1.0,
+  "aircraft_fresnel": 0.0,
+  "aircraft_lighting": false
 }

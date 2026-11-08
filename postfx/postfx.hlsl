@@ -10,10 +10,10 @@
 // ---------------------------------------------------------------- tweakables
 #define EXPOSURE         1.00    // linear brightness multiplier (1 = unchanged)
 #define SHOULDER         0.72    // highlights above this brightness are compressed softly instead of clipping
-#define CONTRAST         0.40    // 0 = off. S-curve in display space: deeper shadows, brighter lights
-#define SATURATION       1.08    // 1 = unchanged
+#define CONTRAST         0.45    // 0 = off. S-curve in display space: deeper shadows, brighter lights
+#define SATURATION       1.12    // 1 = unchanged
 #define BLOOM_STRENGTH   0.22    // glow around bright areas (sun, clouds, water glints)
-#define BLOOM_THRESHOLD  0.80    // linear brightness where glow starts
+#define BLOOM_THRESHOLD  0.55    // linear brightness where glow starts
 #define AO_STRENGTH      1.80    // 0 = off. Darkens creases, tree bases, building edges
 #define AO_RADIUS        8.0     // metres
 #define AO_FADE_NEAR     1500.0  // metres: AO starts fading ...
@@ -249,17 +249,6 @@ float3 ACES(float3 x)
     return saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
 }
 
-// Cockpit pixels: the engine clears depth again before drawing the cabin, so the raw depth is nearer than the saved world depth.
-bool IsCockpitPx(int2 p)
-{
-#if DEPTH_MS
-    float dc = g_depth.Load(p, 0).x, dw = g_world.Load(p, 0).x;
-#else
-    float dc = g_depth.Load(int3(p, 0)).x, dw = g_world.Load(int3(p, 0)).x;
-#endif
-    return (dc > dw) && !IsSky(dc);
-}
-
 float4 PS_Final(VSO i) : SV_Target
 {
     int2 p = int2(i.pos.xy);
@@ -316,10 +305,10 @@ float4 PS_Final(VSO i) : SV_Target
     float ls = (l < SHOULDER) ? l : SHOULDER + (1.0 - SHOULDER) * (1.0 - exp(-(l - SHOULDER) / (1.0 - SHOULDER)));
     lin *= ls / max(l, 1e-5);
     l = dot(lin, LUMA);
-    lin = max(lerp(float3(l, l, l), lin, IsCockpitPx(p) ? 0.96 : SATURATION), 0.0);
+    lin = max(lerp(float3(l, l, l), lin, SATURATION), 0.0);
 
     float3 g = pow(saturate(lin), 1.0 / 2.2);
-    g = lerp(g, g * g * (3.0 - 2.0 * g), CONTRAST * (1.0 - smoothstep(0.40, 0.85, g)));   // deepens shadows, leaves highlights alone
+    g = lerp(g, g * g * (3.0 - 2.0 * g), CONTRAST);
     lin = g;
 
     float2 q = uv - 0.5;

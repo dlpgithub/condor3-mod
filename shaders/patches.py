@@ -200,7 +200,7 @@ def patch_aircraft(src, o):
                   "Filter = ANISOTROPIC;\n    MaxAnisotropy = %d;" % o["anisotropy"],
                   count=2, what="Aircraft: anisotropy")
     # PS, PS_SampleShadowMap, PS_Canopy
-    if o.get("aircraft_gamma", 0.7) != 0.7 or o.get("highlight_knee", 1.0) < 1.0:
+    if o.get("aircraft_lighting", False):
         # lighting "gamma control" 0.7 brightens/flattens everything; hard saturate() flattens lit white surfaces
         src = rep(src, "float4 LightingColor = pow(selfIllumination",
                   "float4 LightingColor = MOD_AIR_GAIN * lerp(CockpitView ? MOD_COCKPIT_GAIN : 1.0, 1.0, selfIllumination) * pow(selfIllumination",
