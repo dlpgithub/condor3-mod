@@ -37,6 +37,11 @@
 //@tune 23 green_desat 0   // less neon greens (0 = off, ~0.3)
 //@tune 24 shadow_lift 0   // open up the darkest shadows (0 = off, ~0.5)
 //@tune 25 terrain_contrast 0   // extra S-curve on terrain only, sky and aircraft untouched (0 = off)
+//@tune 40 land_shadow 0.62     // terrain: how dark terrain/aircraft shadows get (0 = none, 1 = ambient only)
+//@tune 41 land_hemi 0.70       // terrain: sky/ground ambient split by slope (0 = flat ambient)
+//@tune 42 land_sun 1.10        // terrain: sunlight gain
+//@tune 43 land_amb 0.70        // terrain: ambient (sky) light gain
+//@tune 44 land_cloud_shadow 0.62   // terrain: how dark cloud shadows get
 cbuffer TUNE : register(b1) { float4 g_t[16]; }
 #define T(i) (g_t[(i) >> 2][(i) & 3])
 #define BLOOM_TINT       T(5)

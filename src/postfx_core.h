@@ -45,6 +45,9 @@ int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* ctx,
 // Asks the next PfxCore_Run to write <path> (colour + raw depth + camera) for offline tuning.
 void PfxCore_RequestCapture(PfxCore* c, const char* path);
 
+// Current value of live tunable <slot> (see '//@tune' lines in postfx.hlsl); 'fallback' when unavailable.
+float PfxCore_GetTune(PfxCore* c, int slot, float fallback);
+
 // Force a shader reload at the next run.
 void PfxCore_RequestReload(PfxCore* c);
 

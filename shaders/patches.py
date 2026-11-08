@@ -65,8 +65,20 @@ def patch_land(src, o):
         src = rep(src, old, new, what="Land: water glint")
 
     # [MOD] stronger shadows + warm sun / cool ambient
-    src = rep(src, "float TotalShadow = 0.6 + 0.4 * min(min(min(CloudShadow, shadowFactor), shadowFactorAvion), shadowFactorTowplane);",
-              "float ModS = min(min(min(CloudShadow, shadowFactor), shadowFactorAvion), shadowFactorTowplane);\n\tfloat TotalShadow = (1.0 - MOD_SHADOW) + MOD_SHADOW * ModS;\n\tfloat3 ModN = (RealtimeShading == true) ? normalize(input.Norm) : float3(0, 0, 1);", what="Land: shadow")
+    live = bool(o.get("linear_light", 0))
+    if live:
+        # spare bytes of the per-frame constant buffer carry live parameters (written by the d3dx.dll hook from tune.txt)
+        src = rep(src, "  float3 CameraPos;\n", "  float3 CameraPos;\n  float ModP3; // live: ambient gain\n", what="Land: cbuffer P3")
+        src = rep(src, "  float3 SunPos;\n", "  float3 SunPos;\n  float ModP4; // live: cloud shadow strength\n", what="Land: cbuffer P4")
+        src = rep(src, "  float4 AmbientColor;\n  float Time;\n",
+                  "  float4 AmbientColor;\n  float Time;\n  float ModP0; // live: terrain/aircraft shadow strength\n  float ModP1; // live: hemisphere ambient\n  float ModP2; // live: sun gain\n",
+                  what="Land: cbuffer P0-2")
+        src = rep(src, "float TotalShadow = 0.6 + 0.4 * min(min(min(CloudShadow, shadowFactor), shadowFactorAvion), shadowFactorTowplane);",
+                  "float ModS = min(min(shadowFactor, shadowFactorAvion), shadowFactorTowplane);\n\tfloat TotalShadow = ((1.0 - ModP0) + ModP0 * ModS) * ((1.0 - ModP4) + ModP4 * CloudShadow);\n\tfloat3 ModN = (RealtimeShading == true) ? normalize(input.Norm) : float3(0, 0, 1);",
+                  what="Land: shadow (live)")
+    else:
+        src = rep(src, "float TotalShadow = 0.6 + 0.4 * min(min(min(CloudShadow, shadowFactor), shadowFactorAvion), shadowFactorTowplane);",
+                  "float ModS = min(min(min(CloudShadow, shadowFactor), shadowFactorAvion), shadowFactorTowplane);\n\tfloat TotalShadow = (1.0 - MOD_SHADOW) + MOD_SHADOW * ModS;\n\tfloat3 ModN = (RealtimeShading == true) ? normalize(input.Norm) : float3(0, 0, 1);", what="Land: shadow")
     src = rep(src, "float4 LightingColor = saturate(SunColor * sundot + AmbientColor);",
               "float4 LightingColor = saturate(ModSun(SunColor) * sundot + ModAmb(AmbientColor));", what="Land: light tint")
 
@@ -86,7 +98,7 @@ def patch_land(src, o):
     else:
         new = "return ModGradeA(%s);" % old[len("return "):-1]
     if o.get("linear_light", 0):
-        lit = "float4(ModLit(TextureColor.rgb, ModSun(SunColor), ModAmb(AmbientColor), sundot, ModN, TotalShadow), 1)"
+        lit = "float4(ModLitL(TextureColor.rgb, ModSun(SunColor), ModAmb(AmbientColor), sundot, ModN, TotalShadow, ModP1, ModP2, ModP3), 1)"
     else:
         lit = "saturate(LightingColor * TotalShadow * TextureColor)"
     new = new.replace("LITEXPR", lit)

@@ -555,6 +555,8 @@ void PfxCore_RequestCapture(PfxCore* c, const char* path) {
     c->capture = 1;
 }
 
+float PfxCore_GetTune(PfxCore* c, int slot, float fallback) { return (c && slot >= 0 && slot < 64 && c->tuneNames[slot][0]) ? c->tune[slot] : fallback; }
+
 void PfxCore_RequestReload(PfxCore* c) { if (c) c->reload = 1; }
 
 int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* x, ID3D11Texture2D* color, ID3D11RenderTargetView* colorRTV,

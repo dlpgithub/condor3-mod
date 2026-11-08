@@ -104,6 +104,22 @@ float3 ModSkyColor(float3 look, float3 fogColor, float3 sunColor, float3 sunPos)
 }
 
 
+// Terrain version with live parameters (written into spare constant-buffer bytes by the d3dx.dll hook from tune.txt):
+//   hemiK : sky/ground ambient split (0 = flat ambient), sunG / ambG : light gains, directK : shadow term for the direct light.
+// The result goes through the PBR-Neutral shoulder instead of clipping, so a strong sun can be used without burning out.
+float3 ModLitL(float3 tex, float4 sunC, float4 ambC, float sundot, float3 n, float directK, float hemiK, float sunG, float ambG)
+{
+    float3 a  = pow(saturate(tex), 2.2);
+    float3 sl = pow(saturate(sunC.rgb), 2.2) * sunG;
+    float3 al = pow(saturate(ambC.rgb), 2.2) * ambG;
+    float hemi = saturate(n.z * 0.5 + 0.5);
+    float3 skyA = al * float3(0.92, 1.0, 1.14);
+    float3 gndA = al * float3(0.50, 0.46, 0.40);
+    float3 amb = lerp(al, lerp(gndA, skyA, hemi) * 1.25, hemiK);
+    float3 c = a * (sl * saturate(sundot) * directK + amb);
+    return ModNeutral(pow(max(c, 0.0), 1.0 / 2.2));
+}
+
 // Lighting in linear space with a sky/ground hemisphere ambient.
 //   tex      : albedo as stored (sRGB-ish), n : surface normal (z up), sundot : N.L (signed),
 //   directK  : 0..1 factor applied to the DIRECT light only (shadows); ambient is never shadowed.
