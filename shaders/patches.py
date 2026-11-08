@@ -216,6 +216,12 @@ def patch_aircraft(src, o):
                   "float4 OutputColor = ModSoft4(LightingColor * saturate(MaterialColor) * TextureColor);", count=2, what="Aircraft: soft lit colour")
         src = rep(src, "return saturate(OutputColor);", "return ModGradeA(ModSoft4(OutputColor));",
                   count=3, what="Aircraft: grade (aircraft/canopy)")
+    elif o.get("aircraft_neutral", False):
+        # let lit colour exceed 1 and compress it once at the end (PBR-Neutral shoulder) instead of two hard clips
+        src = rep(src, "float4 OutputColor = saturate(LightingColor * saturate(MaterialColor) * TextureColor);",
+                  "float4 OutputColor = LightingColor * saturate(MaterialColor) * TextureColor;", count=2, what="Aircraft: unclamped lit colour")
+        src = rep(src, "return saturate(OutputColor);", "return ModGradeA(ModNeutral4(OutputColor));",
+                  count=3, what="Aircraft: neutral shoulder")
     else:
         src = rep(src, "return saturate(OutputColor);", "return ModGradeA(saturate(OutputColor));",
                   count=3, what="Aircraft: grade (aircraft/canopy)")

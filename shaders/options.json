@@ -26,5 +26,6 @@
   "aircraft_ambient": 1.0,
   "cockpit_gain": 1.0,
   "aircraft_fresnel": 0.0,
-  "aircraft_lighting": false
+  "aircraft_lighting": false,
+  "aircraft_neutral": true
 }

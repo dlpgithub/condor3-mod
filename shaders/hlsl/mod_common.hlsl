@@ -37,6 +37,25 @@ float3 ModSoft(float3 c)
 }
 float4 ModSoft4(float4 c) { return float4(ModSoft(c.rgb), saturate(c.a)); }
 
+// Khronos PBR Neutral style highlight handling: identity below the start, smooth compression above it,
+// and overexposed colour desaturates toward white instead of clipping per channel.
+float3 ModNeutral(float3 c)
+{
+    const float startC = 0.76, desat = 0.15;
+    c = max(c, 0.0);
+    float x = min(c.r, min(c.g, c.b));
+    float offs = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    c -= offs;
+    float peak = max(c.r, max(c.g, c.b));
+    if (peak < startC) return c + offs;
+    float d = 1.0 - startC;
+    float newPeak = 1.0 - d * d / (peak + d - startC);
+    c *= newPeak / peak;
+    float g = 1.0 - 1.0 / (desat * (peak - newPeak) + 1.0);
+    return lerp(c, newPeak.xxx, g) + offs;
+}
+float4 ModNeutral4(float4 c) { return float4(ModNeutral(c.rgb), saturate(c.a)); }
+
 // Aircraft ambient: cool skylight from above, slightly warm ground bounce from below, scaled down for stronger form shading.
 float4 ModAmbAir(float4 amb, float3 n)
 {
