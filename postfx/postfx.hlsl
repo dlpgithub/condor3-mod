@@ -43,6 +43,10 @@
 //@tune 43 land_amb 0.70        // terrain: ambient (sky) light gain
 //@tune 44 land_cloud_shadow 0.62   // terrain: how dark cloud shadows get
 //@tune 46 lut_cockpit 0         // how much of the LUT is applied to the cockpit interior (0 = none, 1 = same as outside)
+//@tune 47 haze_scale 1           // distance haze density multiplier (1 = current, 0 = clear air)
+//@tune 48 haze_blue 0            // 0 = current extinction colour, 1 = Rayleigh-like (distance turns strongly blue, near stays neutral)
+//@tune 49 haze_sun_glow 0        // forward-scattering glow of the haze towards the sun (Mie phase), 0 = off
+//@tune 50 haze_g 0.76            // anisotropy of that glow (0 = even, 0.9 = tight around the sun)
 //@tune 45 lut_strength 0        // colour grading LUT (postfx/lut.cube): 0 = off, 1 = full
 cbuffer TUNE : register(b1) { float4 g_t[16]; }
 #define T(i) (g_t[(i) >> 2][(i) & 3])
@@ -61,6 +65,10 @@ cbuffer TUNE : register(b1) { float4 g_t[16]; }
 #define TERRAIN_CONTRAST T(25)
 #define LUT_STRENGTH     T(45)
 #define LUT_COCKPIT      T(46)
+#define HAZE_SCALE       T(47)
+#define HAZE_BLUE        T(48)
+#define HAZE_SUN_GLOW    T(49)
+#define HAZE_G           T(50)
 #define LUT_SIZE         T(63)   // written by the mod when a LUT is loaded
 
 // ---------------------------------------------------------------- tweakables (fixed values; the ones marked T(n) are live)
@@ -203,11 +211,16 @@ float3 Atmosphere(float3 lin, int2 p, float z)
     float path = (abs(k) < 1e-3) ? dist : dist * (1.0 - exp(-k)) / k;      // integral of exp(-dz*s/H) ds
     float lowSun = smoothstep(0.05, 0.5, g_sunDir.z);                        // low sun: thinner, less glaring haze
     float altFade = lerp(1.0, 0.45, smoothstep(1000.0, 2800.0, g_camPos.z));   // high up (cloud level) the air looks much clearer
-    float tau = HAZE_DENSITY * lerp(0.55, 1.0, lowSun) * altFade * exp(-g_camPos.z / HAZE_HEIGHT) * path;
-    float3 trans = exp(-tau * float3(0.80, 1.00, 1.30));                    // blue is scattered out of the light path first
+    float tau = HAZE_DENSITY * HAZE_SCALE * lerp(0.55, 1.0, lowSun) * altFade * exp(-g_camPos.z / HAZE_HEIGHT) * path;
+    float3 ext = lerp(float3(0.80, 1.00, 1.30), float3(0.45, 1.00, 2.40), HAZE_BLUE);
+    float3 trans = exp(-tau * ext);                    // blue is scattered out of the light path first
     float3 look = normalize(float3(wdir.xy, max(wdir.z, 0.0) * 0.35));      // sky colour near the horizon in that direction
     float3 hazeCol = pow(saturate(EngineSky(look, g_fog.rgb, g_sunColor.rgb, g_sunDir.xyz)), 2.2);
-    return lin * trans + hazeCol * (1.0 - trans) * HAZE_INSCATTER * lerp(0.6, 1.0, lowSun);
+    float cosT = dot(wdir, g_sunDir.xyz);
+    float gg = HAZE_G;
+    float phase = (1.0 - gg * gg) / pow(max(1.0 + gg * gg - 2.0 * gg * cosT, 1e-3), 1.5);   // Henyey-Greenstein, ~1 when isotropic
+    float3 glow = pow(saturate(g_sunColor.rgb), 2.2) * HAZE_SUN_GLOW * saturate(phase * 0.25 - 0.1);
+    return lin * trans + (hazeCol + glow) * (1.0 - trans) * HAZE_INSCATTER * lerp(0.6, 1.0, lowSun);
 }
 
 // ---------------------------------------------------------------- diagnostics helper
