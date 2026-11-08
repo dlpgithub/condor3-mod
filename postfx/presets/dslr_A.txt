@@ -1,0 +1,17 @@
+contrast 0.62
+saturation 1.28
+terrain_contrast 0.25
+clarity 0.45
+clarity_radius 18
+sky_zenith 0.55
+sky_horizon 0.2
+shadow_cool 0.3
+highlight_warm 0.3
+green_warm 0.2
+shadow_lift 0.25
+haze_inscatter 0.75
+sharpen 0.7
+vignette 0.24
+bloom_strength 0.16
+bloom_tint 0.3
+grain 0.12
