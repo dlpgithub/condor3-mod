@@ -14,7 +14,7 @@
 //@tune 0 exposure 1
 //@tune 1 shoulder 0.72
 //@tune 2 contrast 0.45
-//@tune 3 saturation 1.12
+//@tune 3 saturation 1.0
 //@tune 4 bloom_strength 0.22
 //@tune 5 bloom_tint 0.2   // warm halo colour around bright areas (0 = neutral)
 //@tune 6 ao_strength 1.8
@@ -35,19 +35,20 @@
 //@tune 21 highlight_warm 0.15   // warm tint in highlights (0 = off, ~0.5)
 //@tune 22 green_warm 0   // greens toward yellow-olive (0 = off, ~0.5)
 //@tune 23 green_desat 0   // less neon greens (0 = off, ~0.3)
-//@tune 24 shadow_lift 0   // open up the darkest shadows (0 = off, ~0.5)
+//@tune 24 shadow_lift 0.1   // open up the darkest shadows (0 = off, ~0.5)
 //@tune 25 terrain_contrast 0   // extra S-curve on terrain only, sky and aircraft untouched (0 = off)
-//@tune 40 land_shadow 0.75     // terrain: how dark terrain/aircraft shadows get (0 = none, 1 = ambient only)
+//@tune 40 land_shadow 0.7     // terrain: how dark terrain/aircraft shadows get (0 = none, 1 = ambient only)
 //@tune 41 land_hemi 0.8       // terrain: sky/ground ambient split by slope (0 = flat ambient)
-//@tune 42 land_sun 1.2        // terrain: sunlight gain
+//@tune 42 land_sun 1.15        // terrain: sunlight gain
 //@tune 43 land_amb 0.6        // terrain: ambient (sky) light gain
-//@tune 44 land_cloud_shadow 0.75   // terrain: how dark cloud shadows get
+//@tune 44 land_cloud_shadow 0.7   // terrain: how dark cloud shadows get
 //@tune 46 lut_cockpit 0         // how much of the LUT is applied to the cockpit interior (0 = none, 1 = same as outside)
 //@tune 47 haze_scale 1.2           // distance haze density multiplier (1 = current, 0 = clear air)
-//@tune 48 haze_blue 0.6            // 0 = current extinction colour, 1 = Rayleigh-like (distance turns strongly blue, near stays neutral)
-//@tune 49 haze_sun_glow 0.4        // forward-scattering glow of the haze towards the sun (Mie phase), 0 = off
+//@tune 48 haze_blue 0.1            // 0 = current extinction colour, 1 = Rayleigh-like (distance turns strongly blue, near stays neutral)
+//@tune 49 haze_sun_glow 0.25        // forward-scattering glow of the haze towards the sun (Mie phase), 0 = off
 //@tune 50 haze_g 0.76            // anisotropy of that glow (0 = even, 0.9 = tight around the sun)
-//@tune 45 lut_strength 0.5        // colour grading LUT (postfx/lut.cube): 0 = off, 1 = full
+//@tune 51 sky_deep 1.0             // deep blue sky like the MSFS references (0 = off, 1 = full); only the blue sky is darkened, clouds stay white
+//@tune 45 lut_strength 0.3        // colour grading LUT (postfx/lut.cube): 0 = off, 1 = full
 cbuffer TUNE : register(b1) { float4 g_t[16]; }
 #define T(i) (g_t[(i) >> 2][(i) & 3])
 #define BLOOM_TINT       T(5)
@@ -65,6 +66,7 @@ cbuffer TUNE : register(b1) { float4 g_t[16]; }
 #define TERRAIN_CONTRAST T(25)
 #define LUT_STRENGTH     T(45)
 #define LUT_COCKPIT      T(46)
+#define SKY_DEEP         T(51)
 #define HAZE_SCALE       T(47)
 #define HAZE_BLUE        T(48)
 #define HAZE_SUN_GLOW    T(49)
@@ -394,12 +396,14 @@ float4 PS_Final(VSO i) : SV_Target
     {
         float ls0 = dot(lin, LUMA);
         lin = lerp(float3(ls0, ls0, ls0), lin, SKY_SATURATION) * float3(SKY_DARKEN, SKY_DARKEN * 1.01, 1.02);
-        if (g_camPos.w > 0.5 && (SKY_ZENITH > 0.0 || SKY_HORIZON > 0.0))
+        if (g_camPos.w > 0.5 && (SKY_ZENITH > 0.0 || SKY_HORIZON > 0.0 || SKY_DEEP > 0.0))
         {
             float3 vd = normalize(ViewPos(p, 1.0));
             float elev = mul(vd, transpose((float3x3)g_view)).z;                 // 1 = straight up, 0 = horizon
             float zen = smoothstep(0.15, 0.95, elev);
             float hor = 1.0 - smoothstep(0.0, 0.30, elev);
+            float skyness = smoothstep(0.10, 0.30, (lin.b - lin.r) / max(lin.b, 1e-3));         // blue sky yes, white cloud no
+            lin *= lerp(float3(1, 1, 1), float3(0.17, 0.20, 0.27), SKY_DEEP * smoothstep(0.0, 0.45, elev) * skyness);   // display (0.52,0.60,0.70)
             lin *= 1.0 - SKY_ZENITH * zen * float3(0.55, 0.38, 0.12);            // overhead: deeper, bluer
             lin += SKY_HORIZON * hor * 0.06 * float3(0.95, 1.0, 1.05);           // horizon: pale haze glow
         }
