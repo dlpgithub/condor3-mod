@@ -202,7 +202,15 @@ def patch_aircraft(src, o):
     # PS, PS_SampleShadowMap, PS_Canopy
     if o.get("aircraft_gamma", 0.7) != 0.7 or o.get("highlight_knee", 1.0) < 1.0:
         # lighting "gamma control" 0.7 brightens/flattens everything; hard saturate() flattens lit white surfaces
-        src = rep(src, "float4 LightingColor = pow(", "float4 LightingColor = MOD_AIR_GAIN * pow(", count=3, what="Aircraft: light gain")
+        src = rep(src, "float4 LightingColor = pow(selfIllumination",
+                  "float4 LightingColor = MOD_AIR_GAIN * lerp(CockpitView ? MOD_COCKPIT_GAIN : 1.0, 1.0, selfIllumination) * pow(selfIllumination",
+                  count=2, what="Aircraft: light gain")
+        src = rep(src, "float4 LightingColor = pow(ShadeFactor", "float4 LightingColor = MOD_AIR_GAIN * pow(ShadeFactor", what="Aircraft: canopy gain")
+        src = rep(src, "AmbientColor * ambientIntensity),", "ModAmbAir(AmbientColor, N) * ambientIntensity),", what="Aircraft: ambient")
+        src = rep(src, "AmbientColor * ambientIntensityAO),", "ModAmbAir(AmbientColor, N) * ambientIntensityAO),", what="Aircraft: ambient AO")
+        src = rep(src, "\t// Specular lighting\n\tif (SpecularStrength > 0)",
+                  "\tOutputColor.rgb += ModFresnel(N, V, AmbientColor, SpecularStrength, TextureColor.a, CockpitView);\n\t// Specular lighting\n\tif (SpecularStrength > 0)",
+                  count=2, what="Aircraft: fresnel")
         src = rep(src, ", 0.7); // 0.7 is a sort of GAMMA control", ", MOD_AIR_GAMMA);", count=3, what="Aircraft: light gamma")
         src = rep(src, "float4 OutputColor = saturate(LightingColor * saturate(MaterialColor) * TextureColor);",
                   "float4 OutputColor = ModSoft4(LightingColor * saturate(MaterialColor) * TextureColor);", count=2, what="Aircraft: soft lit colour")

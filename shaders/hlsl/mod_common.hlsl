@@ -4,6 +4,9 @@
 #define MOD_SATURATION   @saturation@
 #define MOD_AIR_GAMMA    @air_gamma@     // aircraft lighting "gamma control" (the original uses 0.7, which flattens and brightens)
 #define MOD_AIR_GAIN     @air_gain@
+#define MOD_AIR_AMB      @air_amb@       // aircraft ambient light scale (the original ambient is strong: shaded sides stay bright)
+#define MOD_COCKPIT_GAIN @cockpit_gain@  // interior exposure (the real cabin looks darker than the sky outside)
+#define MOD_AIR_FRESNEL  @air_fresnel@   // soft sky reflection on glossy gel-coat at grazing angles
 #define MOD_KNEE         @knee@          // highlights above this are compressed smoothly instead of clipping (1 = hard clip)
 #define MOD_CLOUD_GAIN   @cloud_gain@
 #define MOD_CURVE        @curve@
@@ -33,6 +36,19 @@ float3 ModSoft(float3 c)
     return (k >= 0.999) ? saturate(c) : (min(c, k) + (1.0 - k) * (1.0 - exp(-over / max(1.0 - k, 0.001))));
 }
 float4 ModSoft4(float4 c) { return float4(ModSoft(c.rgb), saturate(c.a)); }
+
+// Aircraft ambient: cool skylight from above, slightly warm ground bounce from below, scaled down for stronger form shading.
+float4 ModAmbAir(float4 amb, float3 n)
+{
+    float h = saturate(n.z * 0.5 + 0.5);
+    float3 tint = lerp(float3(1.08, 1.0, 0.86), float3(0.90, 1.0, 1.14), h);
+    return float4(amb.rgb * tint * MOD_AIR_AMB, amb.a);
+}
+float3 ModFresnel(float3 n, float3 v, float4 amb, float spec, float a, bool cockpit)
+{
+    float f = pow(1.0 - saturate(dot(n, v)), 4.0);
+    return (cockpit || spec <= 0.0) ? float3(0, 0, 0) : f * a * MOD_AIR_FRESNEL * amb.rgb * float3(0.9, 1.1, 1.5);
+}
 
 float3 ModGrade(float3 c)
 {
