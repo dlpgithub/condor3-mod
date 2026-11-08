@@ -7,3 +7,4 @@ postfx/test/*.bmp
 postfx/test/*.png
 deps/
 shots/
+luts_candidates/

@@ -42,6 +42,8 @@
 //@tune 42 land_sun 1.10        // terrain: sunlight gain
 //@tune 43 land_amb 0.70        // terrain: ambient (sky) light gain
 //@tune 44 land_cloud_shadow 0.62   // terrain: how dark cloud shadows get
+//@tune 46 lut_cockpit 0         // how much of the LUT is applied to the cockpit interior (0 = none, 1 = same as outside)
+//@tune 45 lut_strength 0        // colour grading LUT (postfx/lut.cube): 0 = off, 1 = full
 cbuffer TUNE : register(b1) { float4 g_t[16]; }
 #define T(i) (g_t[(i) >> 2][(i) & 3])
 #define BLOOM_TINT       T(5)
@@ -57,6 +59,9 @@ cbuffer TUNE : register(b1) { float4 g_t[16]; }
 #define GREEN_DESAT      T(23)
 #define SHADOW_LIFT      T(24)
 #define TERRAIN_CONTRAST T(25)
+#define LUT_STRENGTH     T(45)
+#define LUT_COCKPIT      T(46)
+#define LUT_SIZE         T(63)   // written by the mod when a LUT is loaded
 
 // ---------------------------------------------------------------- tweakables (fixed values; the ones marked T(n) are live)
 #define EXPOSURE         T(0)    // linear brightness multiplier (1 = unchanged)
@@ -111,6 +116,7 @@ Texture2D g_t2 : register(t2);
 Texture2D g_t3 : register(t3);
 Texture2D g_t4 : register(t4);
 Texture2D g_ao : register(t5);
+Texture3D<float4> g_lut : register(t7);
 
 SamplerState g_lin : register(s0);
 SamplerState g_pt  : register(s1);
@@ -140,6 +146,19 @@ float LoadDepth(int2 p)
 // D3DX left-handed projection: d = m22 + m32 / z  (works for forward and reversed Z)
 // Condor uses a reversed-Z projection (m32 > 0, far plane = depth 0); forward-Z (m32 < 0) is handled too.
 bool IsSky(float d) { return (g_proj.w > 0.0) ? (d < 1e-7) : (d > 0.999999); }
+
+// Cockpit pixel: the raw depth is nearer than the depth saved before the engine cleared it for the cockpit pass.
+bool CockpitPx(int2 p)
+{
+    p = clamp(p, int2(0, 0), int2(g_screen.xy) - 1);
+#if DEPTH_MS
+    float dc = g_depth.Load(p, 0).x, dw = g_world.Load(p, 0).x;
+#else
+    float dc = g_depth.Load(int3(p, 0)).x, dw = g_world.Load(int3(p, 0)).x;
+#endif
+    return dc > dw && !IsSky(dc);
+}
+
 
 float ViewZ(float d) { return g_proj.w / (d - g_proj.z); }
 
@@ -416,6 +435,12 @@ float4 PS_Final(VSO i) : SV_Target
 #elif DEBUG_VIEW == 3
     outc = saturate(bloom * 4.0);
 #endif
+    if (LUT_STRENGTH > 0.0)   // 3D colour grading (display-referred .cube), blended with the ungraded image
+    {
+        float ln = max(LUT_SIZE, 2.0);
+        float3 uvw = saturate(outc) * ((ln - 1.0) / ln) + 0.5 / ln;
+        outc = lerp(outc, g_lut.SampleLevel(g_lin, uvw, 0).rgb, LUT_STRENGTH * (CockpitPx(p) ? LUT_COCKPIT : 1.0));
+    }
     float n = (IGN(i.pos.xy, g_misc.y) + IGN(i.pos.xy, g_misc.y + 17.0) - 1.0) * (DITHER / 255.0);
     {
         float lo2 = dot(outc, LUMA);

@@ -65,6 +65,11 @@ struct PfxCore {
     char tunePath[MAX_PATH];
     FILETIME tuneTime;
     int tuneDirty;
+    ID3D11Texture3D* lutTex;            // t7: colour grading LUT (postfx/lut.cube); identity when absent
+    ID3D11ShaderResourceView* lutSrv;
+    char lutPath[MAX_PATH];
+    FILETIME lutTime;
+    int lutSize;
 
     UINT w, h;
     Target scene, ao, aoBlur, lv[LEVELS], tmp[LEVELS], capDepth;
@@ -135,6 +140,7 @@ static void ParseTuneDecls(PfxCore* c, const char* src) {
         }
         p += 8;
     }
+    defv[63] = c->tune[63];
     memcpy(c->tune, defv, sizeof defv);
     c->tuneDirty = 1;
 }
@@ -160,6 +166,79 @@ static int TuneFileChanged(PfxCore* c) {
     WIN32_FILE_ATTRIBUTE_DATA d;
     if (!GetFileAttributesExA(c->tunePath, GetFileExInfoStandard, &d)) return 0;
     return CompareFileTime(&d.ftLastWriteTime, &c->tuneTime) != 0;
+}
+
+// ---- 3D colour grading LUT (.cube) ------------------------------------------------------------
+static void SetLut(PfxCore* c, int n, const unsigned short* rgba) {
+    D3D11_TEXTURE3D_DESC d;
+    D3D11_SUBRESOURCE_DATA sd;
+    ID3D11Texture3D* t = NULL;
+    ID3D11ShaderResourceView* v = NULL;
+    memset(&d, 0, sizeof d);
+    d.Width = d.Height = d.Depth = n; d.MipLevels = 1; d.Format = DXGI_FORMAT_R16G16B16A16_UNORM;
+    d.Usage = D3D11_USAGE_IMMUTABLE; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    sd.pSysMem = rgba; sd.SysMemPitch = n * 8; sd.SysMemSlicePitch = n * n * 8;
+    if (FAILED(ID3D11Device_CreateTexture3D(c->dev, &d, &sd, &t))) { PfxLog("postfx: LUT texture creation failed"); return; }
+    if (FAILED(ID3D11Device_CreateShaderResourceView(c->dev, (ID3D11Resource*)t, NULL, &v))) { REL(t); return; }
+    REL(c->lutSrv); REL(c->lutTex);
+    c->lutTex = t; c->lutSrv = v; c->lutSize = n;
+    c->tune[63] = (float)n;            // slot 63 = LUT edge length, read by the shader
+    c->tuneDirty = 1;
+}
+
+static void IdentityLut(PfxCore* c) {
+    unsigned short v[2 * 2 * 2 * 4];
+    int i;
+    for (i = 0; i < 8; i++) {
+        v[i * 4 + 0] = (i & 1) ? 65535 : 0; v[i * 4 + 1] = (i & 2) ? 65535 : 0;
+        v[i * 4 + 2] = (i & 4) ? 65535 : 0; v[i * 4 + 3] = 65535;
+    }
+    SetLut(c, 2, v);
+}
+
+static void LoadLutFile(PfxCore* c) {
+    SIZE_T len = 0;
+    char* t;
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    int n = 0, count = 0, total = 0;
+    unsigned short* out = NULL;
+    char* line;
+    if (GetFileAttributesExA(c->lutPath, GetFileExInfoStandard, &d)) c->lutTime = d.ftLastWriteTime;
+    t = ReadFileAll(c->lutPath, &len);
+    if (!t) { if (c->lutSize != 2) IdentityLut(c); return; }
+    for (line = strtok(t, "\r\n"); line; line = strtok(NULL, "\r\n")) {
+        float r, g, b;
+        while (*line == ' ' || *line == '\t') line++;
+        if (!*line || *line == '#') continue;
+        if (!strncmp(line, "LUT_3D_SIZE", 11)) {
+            n = atoi(line + 11);
+            if (n < 2 || n > 128) { PfxLog("postfx: bad LUT_3D_SIZE %d", n); break; }
+            total = n * n * n;
+            out = (unsigned short*)malloc((size_t)total * 8);
+            if (!out) break;
+            continue;
+        }
+        if (!out) continue;                                    // header lines before the size (TITLE, DOMAIN_*)
+        if ((*line >= '0' && *line <= '9') || *line == '-' || *line == '.') {
+            if (sscanf(line, "%f %f %f", &r, &g, &b) == 3 && count < total) {
+                r = r < 0 ? 0 : (r > 1 ? 1 : r); g = g < 0 ? 0 : (g > 1 ? 1 : g); b = b < 0 ? 0 : (b > 1 ? 1 : b);
+                out[count * 4 + 0] = (unsigned short)(r * 65535.0f + 0.5f);
+                out[count * 4 + 1] = (unsigned short)(g * 65535.0f + 0.5f);
+                out[count * 4 + 2] = (unsigned short)(b * 65535.0f + 0.5f);
+                out[count * 4 + 3] = 65535;
+                count++;
+            }
+        }
+    }
+    if (out && count == total && total > 0) { SetLut(c, n, out); PfxLog("postfx: LUT loaded (%d^3)", n); }
+    else { PfxLog("postfx: lut.cube unusable (%d of %d entries)", count, total); if (c->lutSize != 2) IdentityLut(c); }
+    free(out); free(t);
+}
+
+static int LutFileChanged(PfxCore* c) {
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (!GetFileAttributesExA(c->lutPath, GetFileExInfoStandard, &d)) return c->lutSize != 2;   // removed -> back to identity
+    return CompareFileTime(&d.ftLastWriteTime, &c->lutTime) != 0;
 }
 
 // (Re)compiles all shaders for the given depth variant. On failure the old shaders stay in place.
@@ -527,6 +606,9 @@ PfxCore* PfxCore_Create(ID3D11Device* dev, const char* hlslPath) {
     ID3D11Device_CreateBuffer(dev, &cbd, NULL, &c->cbTune);
     { char* sl; lstrcpynA(c->tunePath, hlslPath, MAX_PATH); sl = strrchr(c->tunePath, '\\'); if (!sl) sl = strrchr(c->tunePath, '/'); if (sl) lstrcpyA(sl + 1, "tune.txt"); else lstrcpyA(c->tunePath, "tune.txt"); }
 
+    { char* sl; lstrcpynA(c->lutPath, hlslPath, MAX_PATH); sl = strrchr(c->lutPath, '\\'); if (!sl) sl = strrchr(c->lutPath, '/'); if (sl) lstrcpyA(sl + 1, "lut.cube"); else lstrcpyA(c->lutPath, "lut.cube"); }
+    IdentityLut(c);
+    LoadLutFile(c);
     if (!c->sLin || !c->sPoint || !c->rs || !c->dss || !c->bs || !c->cb || !c->cbTune) {
         PfxLog("postfx: creating fixed function state failed");
         PfxCore_Destroy(c);
@@ -540,7 +622,7 @@ void PfxCore_Destroy(PfxCore* c) {
     int i;
     if (!c) return;
     ReleaseShaders(c);
-    REL(c->sLin); REL(c->sPoint); REL(c->rs); REL(c->dss); REL(c->bs); REL(c->cb); REL(c->cbTune);
+    REL(c->sLin); REL(c->sPoint); REL(c->rs); REL(c->dss); REL(c->bs); REL(c->cb); REL(c->cbTune); REL(c->lutSrv); REL(c->lutTex);
     ReleaseTarget(&c->scene); ReleaseTarget(&c->ao); ReleaseTarget(&c->aoBlur); ReleaseTarget(&c->capDepth);
     for (i = 0; i < LEVELS; i++) { ReleaseTarget(&c->lv[i]); ReleaseTarget(&c->tmp[i]); }
     REL(c->depthSrv); REL(c->depthTex); REL(c->worldSrv); REL(c->worldTex);
@@ -596,6 +678,7 @@ int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* x, ID3D11Texture2D* color, ID3D
     if (!c->vs || c->shaderMS != depthMS) {
         if (!BuildShaders(c, depthMS) && !c->vs) return 0;   // nothing usable yet; retry after the file changes
     }
+    if ((c->frame & 15) == 0 && LutFileChanged(c)) LoadLutFile(c);
     if (c->tuneDirty) {
         D3D11_MAPPED_SUBRESOURCE m;
         if (SUCCEEDED(ID3D11DeviceContext_Map(x, (ID3D11Resource*)c->cbTune, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
@@ -673,6 +756,7 @@ int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* x, ID3D11Texture2D* color, ID3D
     s[0] = c->scene.srv; s[1] = c->depthSrv; s[6] = worldSrv;
     s[2] = c->lv[0].srv; s[3] = c->lv[1].srv; s[4] = c->lv[2].srv;
     s[5] = c->aoBlur.srv;
+    s[7] = c->lutSrv;
     DrawPass(c, x, cam, colorRTV, c->w, c->h, c->psFinal, s, 0, 0, 0, 0);
 
     RestoreState(x, &st);
