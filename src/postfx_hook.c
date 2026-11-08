@@ -251,9 +251,19 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
         PfxCore_RequestCapture(g_core, path);
     }
 
+    {   // diagnostics: log every change of the per-frame inputs (engine atmosphere valid? depth clears / world copies per frame)
+        static int lastOk = -1, budget = 400; static unsigned lastCopies = 99, lastClears = 99;
+        int ok = (g_atmo.valid && g_frames - g_atmo.frame < 10);
+        if (g_logf && budget > 0 && (ok != lastOk || g_copiesThisFrame != lastCopies || g_clearsThisFrame != lastClears)) {
+            budget--;
+            fprintf(g_logf, "postfx: frame %u atmoOk=%d (age %u) clears=%u copies=%u worldValid=%u\n", g_frames, ok, g_frames - g_atmo.frame, g_clearsThisFrame, g_copiesThisFrame, g_worldValid);
+            fflush(g_logf);
+        }
+        lastOk = ok; lastCopies = g_copiesThisFrame; lastClears = g_clearsThisFrame;
+    }
     if (PfxCore_Run(g_core, (ID3D11DeviceContext*)(uintptr_t)ctx, (ID3D11Texture2D*)(uintptr_t)color,
                     (ID3D11RenderTargetView*)(uintptr_t)rtv, (ID3D11Texture2D*)(uintptr_t)depth,
-                    (g_worldCopy && g_worldValid) ? g_worldCopy : NULL, &cam)) {
+                    (g_worldCopy && g_worldValid && g_copiesThisFrame >= 2) ? g_worldCopy : NULL, &cam)) {   // 1 clear/frame (external view, no cockpit pass): the copy is last frame's depth, the live depth already is the world
         g_fails = 0;
         if (g_logf && (g_frames % 300) == 2) { fprintf(g_logf, "postfx: frame %u: %u clears, %u world copies\n", g_frames, g_clearsThisFrame, g_copiesThisFrame); fflush(g_logf); }
     } else if (++g_fails > 600) {
