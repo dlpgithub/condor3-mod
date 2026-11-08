@@ -59,6 +59,12 @@ struct PfxCore {
     ID3D11DepthStencilState* dss;
     ID3D11BlendState* bs;
     ID3D11Buffer* cb;
+    ID3D11Buffer* cbTune;               // b1: live tunables (postfx.hlsl '//@tune <slot> <name> <default>' lines, overridden by tune.txt)
+    float tune[64];
+    char tuneNames[64][40];
+    char tunePath[MAX_PATH];
+    FILETIME tuneTime;
+    int tuneDirty;
 
     UINT w, h;
     Target scene, ao, aoBlur, lv[LEVELS], tmp[LEVELS], capDepth;
@@ -114,6 +120,48 @@ static void ReleaseShaders(PfxCore* c) {
     REL(c->psAOBlur); REL(c->psFinal); REL(c->psCapDepth);
 }
 
+// ---- live tunables -------------------------------------------------------------------------
+static void ParseTuneDecls(PfxCore* c, const char* src) {
+    const char* p = src;
+    int i;
+    float defv[64];
+    memset(defv, 0, sizeof defv);
+    for (i = 0; i < 64; i++) c->tuneNames[i][0] = 0;
+    while ((p = strstr(p, "//@tune ")) != NULL) {
+        int slot; char name[40]; float v;
+        if (sscanf(p + 8, "%d %39s %f", &slot, name, &v) == 3 && slot >= 0 && slot < 64) {
+            lstrcpynA(c->tuneNames[slot], name, 40);
+            defv[slot] = v;
+        }
+        p += 8;
+    }
+    memcpy(c->tune, defv, sizeof defv);
+    c->tuneDirty = 1;
+}
+
+static void LoadTuneFile(PfxCore* c) {
+    SIZE_T len = 0;
+    char* t = ReadFileAll(c->tunePath, &len);
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    char* line;
+    if (GetFileAttributesExA(c->tunePath, GetFileExInfoStandard, &d)) c->tuneTime = d.ftLastWriteTime;
+    if (!t) return;
+    for (line = strtok(t, "\r\n"); line; line = strtok(NULL, "\r\n")) {
+        char name[40]; float v; int i;
+        if (line[0] == '#' || line[0] == ';') continue;
+        if (sscanf(line, "%39s %f", name, &v) != 2) continue;
+        for (i = 0; i < 64; i++)
+            if (c->tuneNames[i][0] && !_stricmp(c->tuneNames[i], name)) { c->tune[i] = v; c->tuneDirty = 1; break; }
+    }
+    free(t);
+}
+
+static int TuneFileChanged(PfxCore* c) {
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (!GetFileAttributesExA(c->tunePath, GetFileExInfoStandard, &d)) return 0;
+    return CompareFileTime(&d.ftLastWriteTime, &c->tuneTime) != 0;
+}
+
 // (Re)compiles all shaders for the given depth variant. On failure the old shaders stay in place.
 static int BuildShaders(PfxCore* c, int ms) {
     SIZE_T len = 0;
@@ -129,6 +177,8 @@ static int BuildShaders(PfxCore* c, int ms) {
     int i, ok = 1;
 
     if (!src) { PfxLog("postfx: cannot read %s", c->hlslPath); return 0; }
+    ParseTuneDecls(c, src);
+    LoadTuneFile(c);
     defs[0].Name = "DEPTH_MS"; defs[0].Definition = ms ? "1" : "0";
     defs[1].Name = NULL; defs[1].Definition = NULL;
 
@@ -473,8 +523,11 @@ PfxCore* PfxCore_Create(ID3D11Device* dev, const char* hlslPath) {
     cbd.ByteWidth = sizeof(CBData); cbd.Usage = D3D11_USAGE_DYNAMIC; cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     ID3D11Device_CreateBuffer(dev, &cbd, NULL, &c->cb);
+    cbd.ByteWidth = 64 * sizeof(float);
+    ID3D11Device_CreateBuffer(dev, &cbd, NULL, &c->cbTune);
+    { char* sl; lstrcpynA(c->tunePath, hlslPath, MAX_PATH); sl = strrchr(c->tunePath, '\\'); if (!sl) sl = strrchr(c->tunePath, '/'); if (sl) lstrcpyA(sl + 1, "tune.txt"); else lstrcpyA(c->tunePath, "tune.txt"); }
 
-    if (!c->sLin || !c->sPoint || !c->rs || !c->dss || !c->bs || !c->cb) {
+    if (!c->sLin || !c->sPoint || !c->rs || !c->dss || !c->bs || !c->cb || !c->cbTune) {
         PfxLog("postfx: creating fixed function state failed");
         PfxCore_Destroy(c);
         return NULL;
@@ -487,7 +540,7 @@ void PfxCore_Destroy(PfxCore* c) {
     int i;
     if (!c) return;
     ReleaseShaders(c);
-    REL(c->sLin); REL(c->sPoint); REL(c->rs); REL(c->dss); REL(c->bs); REL(c->cb);
+    REL(c->sLin); REL(c->sPoint); REL(c->rs); REL(c->dss); REL(c->bs); REL(c->cb); REL(c->cbTune);
     ReleaseTarget(&c->scene); ReleaseTarget(&c->ao); ReleaseTarget(&c->aoBlur); ReleaseTarget(&c->capDepth);
     for (i = 0; i < LEVELS; i++) { ReleaseTarget(&c->lv[i]); ReleaseTarget(&c->tmp[i]); }
     REL(c->depthSrv); REL(c->depthTex); REL(c->worldSrv); REL(c->worldTex);
@@ -510,7 +563,7 @@ int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* x, ID3D11Texture2D* color, ID3D
     ID3D11ShaderResourceView* worldSrv;
     SavedState st;
     ID3D11ShaderResourceView* s[8];
-    ID3D11Buffer* cbs[1];
+    ID3D11Buffer* cbs[2];
     ID3D11SamplerState* smp[2];
     int i, depthMS;
 
@@ -532,8 +585,22 @@ int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* x, ID3D11Texture2D* color, ID3D
         PfxLog("postfx: reloading shaders");
         BuildShaders(c, depthMS);
     }
+    if ((c->frame & 7) == 0 && TuneFileChanged(c)) {   // tune.txt edited: back to the declared defaults, then apply the file
+        SIZE_T l2 = 0;
+        char* hs = ReadFileAll(c->hlslPath, &l2);
+        if (hs) { ParseTuneDecls(c, hs); free(hs); }
+        LoadTuneFile(c);
+    }
     if (!c->vs || c->shaderMS != depthMS) {
         if (!BuildShaders(c, depthMS) && !c->vs) return 0;   // nothing usable yet; retry after the file changes
+    }
+    if (c->tuneDirty) {
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (SUCCEEDED(ID3D11DeviceContext_Map(x, (ID3D11Resource*)c->cbTune, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+            memcpy(m.pData, c->tune, sizeof c->tune);
+            ID3D11DeviceContext_Unmap(x, (ID3D11Resource*)c->cbTune, 0);
+            c->tuneDirty = 0;
+        }
     }
     if (!EnsureSize(c, cd.Width, cd.Height)) { c->failed = 1; return 0; }
 
@@ -550,9 +617,9 @@ int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* x, ID3D11Texture2D* color, ID3D
     }
     ID3D11DeviceContext_VSSetShader(x, c->vs, NULL, 0);
     ID3D11DeviceContext_GSSetShader(x, NULL, NULL, 0);
-    cbs[0] = c->cb;
-    ID3D11DeviceContext_VSSetConstantBuffers(x, 0, 1, cbs);
-    ID3D11DeviceContext_PSSetConstantBuffers(x, 0, 1, cbs);
+    cbs[0] = c->cb; cbs[1] = c->cbTune;
+    ID3D11DeviceContext_VSSetConstantBuffers(x, 0, 2, cbs);
+    ID3D11DeviceContext_PSSetConstantBuffers(x, 0, 2, cbs);
     smp[0] = c->sLin; smp[1] = c->sPoint;
     ID3D11DeviceContext_PSSetSamplers(x, 0, 2, smp);
     ID3D11DeviceContext_RSSetScissorRects(x, 0, NULL);

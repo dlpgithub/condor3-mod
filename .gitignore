@@ -6,3 +6,4 @@ postfx/test/*.bin
 postfx/test/*.bmp
 postfx/test/*.png
 deps/
+shots/
