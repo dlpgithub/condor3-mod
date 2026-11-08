@@ -13,6 +13,7 @@ case "${1:-}" in
     [ -f "$BAK" ] || cp "$GAME/d3dx.dll" "$BAK"
     cp "$ROOT/build/d3dx.dll" "$GAME/d3dx.dll"
     mkdir -p "$GAME/postfx"; cp "$ROOT/postfx/postfx.hlsl" "$GAME/postfx/"
+    [ -f "$GAME/postfx/lut.cube" ] || cp "$ROOT/postfx/default_lut/lut.cube" "$GAME/postfx/lut.cube"
     echo "Installed. Start Condor normally.  F9 = effect on/off, F8 = reload shader, F10 = capture frame."
     echo "Log: $GAME/postfx/postfx.log   Remove again: scripts/postfx.sh uninstall" ;;
   uninstall)

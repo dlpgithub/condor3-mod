@@ -16,7 +16,7 @@
 //@tune 2 contrast 0.45
 //@tune 3 saturation 1.12
 //@tune 4 bloom_strength 0.22
-//@tune 5 bloom_tint 0   // warm halo colour around bright areas (0 = neutral)
+//@tune 5 bloom_tint 0.2   // warm halo colour around bright areas (0 = neutral)
 //@tune 6 ao_strength 1.8
 //@tune 7 sharpen 0.5
 //@tune 8 vignette 0.18
@@ -27,27 +27,27 @@
 //@tune 13 dither 1
 //@tune 14 clarity 0   // local contrast on mid-tones, large radius (0 = off, ~0.3 = DSLR-like)
 //@tune 15 clarity_radius 14   // pixels
-//@tune 16 sky_zenith 0   // deeper blue overhead (0 = off, ~0.4)
-//@tune 17 sky_horizon 0   // pale glow near the horizon (0 = off, ~0.5)
+//@tune 16 sky_zenith 0.25   // deeper blue overhead (0 = off, ~0.4)
+//@tune 17 sky_horizon 0.15   // pale glow near the horizon (0 = off, ~0.5)
 //@tune 18 chroma_ab 0   // lens colour fringing at the screen edges, pixels (0 = off, ~1.0)
 //@tune 19 grain 0   // fine sensor grain (0 = off, ~0.3)
-//@tune 20 shadow_cool 0   // cool tint in shadows (0 = off, ~0.5)
-//@tune 21 highlight_warm 0   // warm tint in highlights (0 = off, ~0.5)
+//@tune 20 shadow_cool 0.15   // cool tint in shadows (0 = off, ~0.5)
+//@tune 21 highlight_warm 0.15   // warm tint in highlights (0 = off, ~0.5)
 //@tune 22 green_warm 0   // greens toward yellow-olive (0 = off, ~0.5)
 //@tune 23 green_desat 0   // less neon greens (0 = off, ~0.3)
 //@tune 24 shadow_lift 0   // open up the darkest shadows (0 = off, ~0.5)
 //@tune 25 terrain_contrast 0   // extra S-curve on terrain only, sky and aircraft untouched (0 = off)
-//@tune 40 land_shadow 0.62     // terrain: how dark terrain/aircraft shadows get (0 = none, 1 = ambient only)
-//@tune 41 land_hemi 0.70       // terrain: sky/ground ambient split by slope (0 = flat ambient)
-//@tune 42 land_sun 1.10        // terrain: sunlight gain
-//@tune 43 land_amb 0.70        // terrain: ambient (sky) light gain
-//@tune 44 land_cloud_shadow 0.62   // terrain: how dark cloud shadows get
+//@tune 40 land_shadow 0.75     // terrain: how dark terrain/aircraft shadows get (0 = none, 1 = ambient only)
+//@tune 41 land_hemi 0.8       // terrain: sky/ground ambient split by slope (0 = flat ambient)
+//@tune 42 land_sun 1.2        // terrain: sunlight gain
+//@tune 43 land_amb 0.6        // terrain: ambient (sky) light gain
+//@tune 44 land_cloud_shadow 0.75   // terrain: how dark cloud shadows get
 //@tune 46 lut_cockpit 0         // how much of the LUT is applied to the cockpit interior (0 = none, 1 = same as outside)
-//@tune 47 haze_scale 1           // distance haze density multiplier (1 = current, 0 = clear air)
-//@tune 48 haze_blue 0            // 0 = current extinction colour, 1 = Rayleigh-like (distance turns strongly blue, near stays neutral)
-//@tune 49 haze_sun_glow 0        // forward-scattering glow of the haze towards the sun (Mie phase), 0 = off
+//@tune 47 haze_scale 1.2           // distance haze density multiplier (1 = current, 0 = clear air)
+//@tune 48 haze_blue 0.6            // 0 = current extinction colour, 1 = Rayleigh-like (distance turns strongly blue, near stays neutral)
+//@tune 49 haze_sun_glow 0.4        // forward-scattering glow of the haze towards the sun (Mie phase), 0 = off
 //@tune 50 haze_g 0.76            // anisotropy of that glow (0 = even, 0.9 = tight around the sun)
-//@tune 45 lut_strength 0        // colour grading LUT (postfx/lut.cube): 0 = off, 1 = full
+//@tune 45 lut_strength 0.5        // colour grading LUT (postfx/lut.cube): 0 = off, 1 = full
 cbuffer TUNE : register(b1) { float4 g_t[16]; }
 #define T(i) (g_t[(i) >> 2][(i) & 3])
 #define BLOOM_TINT       T(5)

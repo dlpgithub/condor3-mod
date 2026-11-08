@@ -124,11 +124,11 @@ static void STDMETHODCALLTYPE UpdSubHook(ID3D11DeviceContext* self, ID3D11Resour
                     if (fabsf(l - 1.0f) < 0.02f) {
                         static float patched[104];
                         memcpy(patched, src, 416);
-                        patched[101] = PfxCore_GetTune(g_core, 40, 0.62f);   // ModP0 terrain/aircraft shadow strength
-                        patched[102] = PfxCore_GetTune(g_core, 41, 0.70f);   // ModP1 hemisphere ambient
-                        patched[103] = PfxCore_GetTune(g_core, 42, 1.10f);   // ModP2 sun gain
-                        patched[83]  = PfxCore_GetTune(g_core, 43, 0.70f);   // ModP3 ambient gain
-                        patched[91]  = PfxCore_GetTune(g_core, 44, 0.62f);   // ModP4 cloud shadow strength
+                        patched[101] = PfxCore_GetTune(g_core, 40, 0.75f);   // ModP0 terrain/aircraft shadow strength
+                        patched[102] = PfxCore_GetTune(g_core, 41, 0.80f);   // ModP1 hemisphere ambient
+                        patched[103] = PfxCore_GetTune(g_core, 42, 1.20f);   // ModP2 sun gain
+                        patched[83]  = PfxCore_GetTune(g_core, 43, 0.60f);   // ModP3 ambient gain
+                        patched[91]  = PfxCore_GetTune(g_core, 44, 0.75f);   // ModP4 cloud shadow strength
                         src = patched;
                         memcpy(g_atmo.view, f, 64); memcpy(g_atmo.camPos, f + 80, 12); memcpy(g_atmo.fog, f + 84, 16);
                         memcpy(g_atmo.sun, f + 88, 12); memcpy(g_atmo.sunColor, f + 92, 16); memcpy(g_atmo.amb, f + 96, 16);

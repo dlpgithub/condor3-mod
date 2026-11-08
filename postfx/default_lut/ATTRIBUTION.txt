@@ -1,0 +1,2 @@
+lut.cube = "fuji_provia_100f" colour look-up table from the G'MIC film presets collection (https://gmic.eu/color_presets/),
+licensed CC BY-SA 2.0. Replace it with any .cube file you prefer; delete <game>/postfx/lut.cube (or set lut_strength 0) to turn it off.
