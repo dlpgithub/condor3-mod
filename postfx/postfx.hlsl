@@ -50,6 +50,7 @@
 //@tune 51 sky_deep 0             // deep blue sky like the MSFS references (0 = off, 1 = full); only the blue sky is darkened, clouds stay white
 //@tune 52 contact_shadow 0.35     // screen-space sun shadows from the depth buffer: grounds trees, buildings, glider (0 = off)
 //@tune 53 contact_dist 30        // how far (metres) the shadow ray travels toward the sun
+//@tune 54 warmth 0.11         // white balance after the LUT: + = warmer (less blue), - = cooler
 //@tune 45 lut_strength 0.75        // colour grading LUT (postfx/lut.cube): 0 = off, 1 = full
 cbuffer TUNE : register(b1) { float4 g_t[16]; }
 #define T(i) (g_t[(i) >> 2][(i) & 3])
@@ -71,6 +72,7 @@ cbuffer TUNE : register(b1) { float4 g_t[16]; }
 #define SKY_DEEP         T(51)
 #define CONTACT_SHADOW   T(52)
 #define CONTACT_DIST     T(53)
+#define WARMTH           T(54)
 #define HAZE_SCALE       T(47)
 #define HAZE_BLUE        T(48)
 #define HAZE_SUN_GLOW    T(49)
@@ -491,6 +493,10 @@ float4 PS_Final(VSO i) : SV_Target
         float ln = max(LUT_SIZE, 2.0);
         float3 uvw = saturate(outc) * ((ln - 1.0) / ln) + 0.5 / ln;
         outc = lerp(outc, g_lut.SampleLevel(g_lin, uvw, 0).rgb, LUT_STRENGTH * (CockpitPx(p) ? LUT_COCKPIT : 1.0));
+    }
+    {   // white balance in linear light, skipped in the cockpit so instruments keep their colours
+        float3 wl = pow(saturate(outc), 2.2) * float3(1.0 + WARMTH, 1.0 + WARMTH * 0.15, 1.0 - WARMTH * 1.1);
+        outc = lerp(pow(saturate(wl), 1.0 / 2.2), outc, CockpitPx(p) ? 1.0 : 0.0);
     }
     float n = (IGN(i.pos.xy, g_misc.y) + IGN(i.pos.xy, g_misc.y + 17.0) - 1.0) * (DITHER / 255.0);
     {
