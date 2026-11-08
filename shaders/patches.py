@@ -61,8 +61,19 @@ def patch_land(src, o):
         new = ("float ModWater = 1 - TextureColor.a;\n"
                "\t  " + old + "\n"
                "\t  // [MOD] sharp, sun-tinted glitter on top of the broad highlight\n"
-               "\t  TextureColor.rgb += ModWater * MOD_WATER_GLINT * lerp(float3(1, 1, 1), SunColor.rgb, 0.6) * pow(saturate(dot(Rs, V)), 160);")
+               "\t  TextureColor.rgb += ModWater * MOD_WATER_GLINT * lerp(float3(1, 1, 1), SunColor.rgb, 0.6) * pow(saturate(dot(Rs, V)), 160);\n"
+               "\t  // [MOD] Fresnel sky reflection: lakes mirror the sky at shallow view angles\n"
+               "\t  float3 ModWN = normalize(float3(0.35 * WaterBumpMapColor.x, 0.35 * WaterBumpMapColor.y, 1));\n"
+               "\t  float3 ModWR = reflect(-V, ModWN); ModWR.z = abs(ModWR.z);\n"
+               "\t  float ModWF = 0.03 + 0.97 * pow(1 - saturate(dot(ModWN, V)), 5);\n"
+               "\t  float3 ModWSky = ModSkyColor(normalize(ModWR), FogColor.xyz, SunColor.xyz, SunPos);\n"
+               "\t  TextureColor.rgb = lerp(TextureColor.rgb, ModWSky, saturate(ModWF * MOD_WATER_REFL) * ModWater);")
         src = rep(src, old, new, what="Land: water glint")
+
+    if o.get("soft_shadow", False):
+        # single-tap shadow lookup gives hard, blocky edges and dark triangles on slopes: use the game's own 16-tap filter
+        src = rep(src, "shadowFactor = getShadowFactor(input.lpos, txDiffuseShadow, false);",
+                  "shadowFactor = getShadowFactor(input.lpos, txDiffuseShadow, true);", what="Land: soft self shadow")
 
     # [MOD] stronger shadows + warm sun / cool ambient
     live = bool(o.get("linear_light", 0))
@@ -161,6 +172,9 @@ def patch_grass(src, o):
         src = rep(src, "float4 OutputColor = float4(input.Color.rgb * (TexColor.rgb + 0.5) * LightingColor * TotalShadow, TexColor.a);",
                   "float4 OutputColor = float4(ModLit(input.Color.rgb * (TexColor.rgb + 0.5), ModSun(SunColor), ModAmb(AmbientColor), sundot, float3(0, 0, 1), TotalShadow), TexColor.a);",
                   what="Grass: linear light")
+    if o.get("soft_shadow", False):
+        src = rep(src, "getShadowFactor(input.lpos, txDiffuseShadowAvion, false)", "getShadowFactor(input.lpos, txDiffuseShadowAvion, true)", what="Grass: soft shadow 1")
+        src = rep(src, "getShadowFactor(input.lpos1, txDiffuseShadowTowplane, false)", "getShadowFactor(input.lpos1, txDiffuseShadowTowplane, true)", what="Grass: soft shadow 2")
     return rep(src, "return OutputColor;", "return ModGradeA(OutputColor);", what="Grass: grade")
 
 
@@ -184,7 +198,7 @@ def patch_cloud(src, o):
                   "\t\tfloat ModShade = lerp(1.0 - %.3f, 1.0, ModUp);\n"
                   "\t\tfloat ModThin = saturate(1.0 - 1.6 * TextureColor.a);\n"
                   "\t\tfloat ModFwd = exp(-4.0 * input.dAngle) * (0.4 + 0.6 * saturate(1.0 - ModNU.z * ModNU.z));\n"
-                  "\t\tLightingColor = ModSoft4(MOD_CLOUD_GAIN * (SunColor * lightIntensity * ModShade + AmbientColor * lerp(ModShade, 1.0, 0.5) + 0.5 * glare + %.3f * ModFwd * ModThin * SunColor));"
+                  "\t\tLightingColor = ModSoft4(MOD_CLOUD_GAIN * (ModSun(SunColor) * lightIntensity * ModShade + ModAmb(AmbientColor) * lerp(ModShade, 1.0, 0.5) + 0.5 * glare + %.3f * ModFwd * ModThin * SunColor));"
                   % (shade, silver), what="Cloud: lighting")
     return wrap_returns(src, r"return (lerp\([^;]*\));", 2, "Cloud: grade")
 
@@ -234,6 +248,19 @@ def patch_aircraft(src, o):
                   "float4 OutputColor = LightingColor * saturate(MaterialColor) * TextureColor;", count=2, what="Aircraft: unclamped lit colour")
         src = rep(src, "return saturate(OutputColor);", "return ModGradeA(ModNeutral4(OutputColor));",
                   count=3, what="Aircraft: neutral shoulder")
+        if o.get("aircraft_reflect", 0.0) > 0:
+            src = rep(src, "\t// Specular lighting\n\tif (SpecularStrength > 0)",
+                      "\tOutputColor.rgb += ModAirReflect(N, V, LightDir, LightColor, FogColor, SpecularStrength, TextureColor.a, CockpitView);\n\t// Specular lighting\n\tif (SpecularStrength > 0)",
+                      count=2, what="Aircraft: sky reflection")
+            src = rep(src, "OutputColor.a = pow((1 - Dot), 1.0) * MaterialColor.a * TextureColor.a * (0.5 + 0.5 * ShadeFactor) * (0.5 + 0.5 * shadowFactor);",
+                      "OutputColor.a = pow((1 - Dot), 1.0) * MaterialColor.a * TextureColor.a * (0.5 + 0.5 * ShadeFactor) * (0.5 + 0.5 * shadowFactor);\n"
+                      "\t// [MOD] glass mirrors the sky at grazing angles\n"
+                      "\tfloat ModCF = 0.06 + 0.94 * pow(1.0 - saturate(Dot), 4.0);\n"
+                      "\tfloat3 ModCR = 2.0 * saturate(Dot) * N - V;\n"
+                      "\tfloat ModCW = CockpitView ? 0.0 : saturate(ModCF * MOD_AIR_REFL * 1.2);\n"
+                      "\tOutputColor.rgb = lerp(OutputColor.rgb, ModSkyRefl(ModCR, LightDir, LightColor, FogColor), ModCW);\n"
+                      "\tOutputColor.a = saturate(OutputColor.a + ModCW * (1.0 - OutputColor.a));",
+                      what="Aircraft: canopy reflection")
     else:
         src = rep(src, "return saturate(OutputColor);", "return ModGradeA(saturate(OutputColor));",
                   count=3, what="Aircraft: grade (aircraft/canopy)")

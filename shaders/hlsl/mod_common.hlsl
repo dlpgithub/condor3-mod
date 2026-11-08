@@ -7,6 +7,8 @@
 #define MOD_AIR_AMB      @air_amb@       // aircraft ambient light scale (the original ambient is strong: shaded sides stay bright)
 #define MOD_COCKPIT_GAIN @cockpit_gain@  // interior exposure (the real cabin looks darker than the sky outside)
 #define MOD_AIR_FRESNEL  @air_fresnel@   // soft sky reflection on glossy gel-coat at grazing angles
+#define MOD_AIR_REFL     @air_reflect@   // sky reflection (Fresnel) on gel-coat and canopy
+#define MOD_WATER_REFL   @water_reflect@ // sky reflection (Fresnel) on lakes
 #define MOD_KNEE         @knee@          // highlights above this are compressed smoothly instead of clipping (1 = hard clip)
 #define MOD_CLOUD_GAIN   @cloud_gain@
 #define MOD_CURVE        @curve@
@@ -134,5 +136,21 @@ float3 ModLit(float3 tex, float4 sunC, float4 ambC, float sundot, float3 n, floa
     float3 gndA = al * float3(0.50, 0.46, 0.40);
     float3 amb = lerp(al, lerp(gndA, skyA, hemi) * 1.25, MOD_HEMI);
     float3 c = a * (sl * saturate(sundot) * directK + amb);
-    return pow(saturate(c), 1.0 / 2.2);
+    return ModNeutral(pow(max(c, 0.0), 1.0 / 2.2));
+}
+
+// Sky reflection for glossy aircraft surfaces (Schlick Fresnel, F0 = 0.04). n, v, lightDir in the same (world) space, z = up.
+float3 ModSkyRefl(float3 r, float3 lightDir, float4 lightColor, float4 fogColor)
+{
+    float3 sky = ModSkyColor(r, fogColor.rgb, lightColor.rgb, normalize(-lightDir));
+    float up = smoothstep(-0.15, 0.10, r.z);
+    return lerp(fogColor.rgb * 0.35, sky, up);
+}
+float3 ModAirReflect(float3 n, float3 v, float3 lightDir, float4 lightColor, float4 fogColor, float spec, float a, bool cockpit)
+{
+    if (cockpit || spec <= 0.0) return float3(0, 0, 0);
+    float nv = saturate(dot(n, v));
+    float f = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
+    float3 r = 2.0 * nv * n - v;
+    return ModSkyRefl(r, lightDir, lightColor, fogColor) * (f * a * MOD_AIR_REFL * saturate(spec * 2.0));
 }

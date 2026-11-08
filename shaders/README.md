@@ -16,6 +16,11 @@ Tweak strengths/toggles in `options.json`, then rebuild.
 - Per-pixel sky/fog/haze (removes vertex-interpolated banding), plus dither
 - Mild saturation + S-curve grade, applied consistently to everything that blends with sky/fog
 - Low-frequency detail to break up terrain tiling; sun-tinted water glint
+- Fresnel sky reflection on lakes (`water_reflect`) and on glider gel-coat and canopy (`aircraft_reflect`)
+- Soft (16-tap) terrain self-shadow and grass shadows (`soft_shadow`): no hard dark triangles on slopes
+- Trees, grass and terrain share one linear-light model (sun + hemisphere ambient, neutral highlight shoulder)
+- Clouds: warm sun-lit tops, cool shaded undersides
+- postfx: screen-space contact shadows from the depth buffer (`contact_shadow`, `contact_dist`)
 
 ## How it works
 `patches.py` does exact-match replacements on the decoded originals and fails loudly if a shader differs.

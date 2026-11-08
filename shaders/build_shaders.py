@@ -76,6 +76,8 @@ def common_block(o):
         "air_gain": "%.4f" % o.get("aircraft_gain", 1.0),
         "air_amb": "%.4f" % o.get("aircraft_ambient", 1.0),
         "cockpit_gain": "%.4f" % o.get("cockpit_gain", 1.0),
+        "air_reflect": "%.4f" % o.get("aircraft_reflect", 0.0),
+        "water_reflect": "%.4f" % o.get("water_reflect", 0.0),
         "air_fresnel": "%.4f" % o.get("aircraft_fresnel", 0.0),
         "knee": "%.4f" % o.get("highlight_knee", 1.0),
         "cloud_gain": "%.4f" % o.get("cloud_gain", 1.0),

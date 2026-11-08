@@ -48,6 +48,8 @@
 //@tune 49 haze_sun_glow 0.15        // forward-scattering glow of the haze towards the sun (Mie phase), 0 = off
 //@tune 50 haze_g 0.76            // anisotropy of that glow (0 = even, 0.9 = tight around the sun)
 //@tune 51 sky_deep 0             // deep blue sky like the MSFS references (0 = off, 1 = full); only the blue sky is darkened, clouds stay white
+//@tune 52 contact_shadow 0.35     // screen-space sun shadows from the depth buffer: grounds trees, buildings, glider (0 = off)
+//@tune 53 contact_dist 30        // how far (metres) the shadow ray travels toward the sun
 //@tune 45 lut_strength 0.75        // colour grading LUT (postfx/lut.cube): 0 = off, 1 = full
 cbuffer TUNE : register(b1) { float4 g_t[16]; }
 #define T(i) (g_t[(i) >> 2][(i) & 3])
@@ -67,6 +69,8 @@ cbuffer TUNE : register(b1) { float4 g_t[16]; }
 #define LUT_STRENGTH     T(45)
 #define LUT_COCKPIT      T(46)
 #define SKY_DEEP         T(51)
+#define CONTACT_SHADOW   T(52)
+#define CONTACT_DIST     T(53)
 #define HAZE_SCALE       T(47)
 #define HAZE_BLUE        T(48)
 #define HAZE_SUN_GLOW    T(49)
@@ -328,6 +332,31 @@ float4 PS_Blur(VSO i) : SV_Target
     return float4(c, 1);
 }
 
+// ---------------------------------------------------------------- contact shadows
+// March from the pixel toward the sun through the depth buffer; a nearer surface blocking the ray means the pixel is shadowed.
+float ContactShadow(int2 p, float3 P)
+{
+    float3 sv = normalize(mul(g_sunDir.xyz, (float3x3)g_view));      // world -> view
+    float L = max(CONTACT_DIST, 1.0);
+    float jitter = 0.5;   // fixed offsets: random jitter showed up as speckle on thin surfaces
+    float occ = 0;
+    [unroll]
+    for (int k = 0; k < 20; k++)
+    {
+        float t = (k + jitter) / 20.0;
+        float3 Q = P + sv * (t * t * L + 0.15);
+        if (Q.z < 0.2) continue;
+        float2 ndc = float2(Q.x / Q.z * g_proj.x, Q.y / Q.z * g_proj.y);
+        int2 q = int2((ndc.x * 0.5 + 0.5) * g_screen.x, (0.5 - ndc.y * 0.5) * g_screen.y);
+        if (q.x < 0 || q.y < 0 || q.x >= int(g_screen.x) || q.y >= int(g_screen.y)) continue;
+        float dq = LoadDepth(q);
+        if (IsSky(dq)) continue;
+        float diff = Q.z - ViewZ(dq);                                 // > 0: the ray point lies behind the visible surface
+        if (diff > 0.35 + 0.006 * Q.z && diff < 0.25 * L) occ = max(occ, 1.0 - t);
+    }
+    return occ;
+}
+
 // ---------------------------------------------------------------- final composite
 float3 ACES(float3 x)
 {
@@ -378,6 +407,11 @@ float4 PS_Final(VSO i) : SV_Target
         float ao = g_ao.Load(int3(p, 0)).r;
         float fade = 1.0 - saturate((z - AO_FADE_NEAR) / (AO_FADE_FAR - AO_FADE_NEAR));
         lin *= lerp(1.0, ao, AO_STRENGTH * fade);
+        if (CONTACT_SHADOW > 0.0 && g_camPos.w > 0.5 && g_sunDir.z > 0.03 && !CockpitPx(p))
+        {
+            float cs = ContactShadow(p, ViewPos(p, z));
+            lin *= 1.0 - 0.6 * CONTACT_SHADOW * cs * fade * smoothstep(0.03, 0.2, g_sunDir.z);
+        }
 
         if (g_camPos.w > 0.5)
         {
