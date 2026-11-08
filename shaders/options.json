@@ -18,5 +18,9 @@
   "sun_gain": 1.1,
   "amb_gain": 0.7,
   "cloud_shade": 0.35,
-  "cloud_silver": 0.9
+  "cloud_silver": 0.9,
+  "aircraft_gamma": 0.85,
+  "aircraft_gain": 1.1,
+  "highlight_knee": 0.72,
+  "cloud_gain": 0.97
 }

@@ -2,6 +2,10 @@
 // Condor 3 shader mod - shared helpers (inserted by build_shaders.py)
 // ============================================================================
 #define MOD_SATURATION   @saturation@
+#define MOD_AIR_GAMMA    @air_gamma@     // aircraft lighting "gamma control" (the original uses 0.7, which flattens and brightens)
+#define MOD_AIR_GAIN     @air_gain@
+#define MOD_KNEE         @knee@          // highlights above this are compressed smoothly instead of clipping (1 = hard clip)
+#define MOD_CLOUD_GAIN   @cloud_gain@
 #define MOD_CURVE        @curve@
 #define MOD_DITHER       @dither@
 #define MOD_MACRO_DETAIL @macro_detail@
@@ -20,6 +24,16 @@ float4 ModAmb(float4 amb) { return float4(amb.rgb * float3(1.0 - MOD_COOL, 1.0, 
 // Gentle colour grade: saturation + a soft S-curve for contrast.
 // Applied to everything that ends up on screen *together* (terrain, sky,
 // clouds, trees, aircraft) so haze and fog colours keep matching each other.
+// Soft shoulder: identity below the knee, then asymptotically approaches 1. Keeps gradients where saturate() flattened them.
+float3 ModSoft(float3 c)
+{
+    c = max(c, 0.0);
+    float k = MOD_KNEE;
+    float3 over = max(c - k, 0.0);
+    return (k >= 0.999) ? saturate(c) : (min(c, k) + (1.0 - k) * (1.0 - exp(-over / max(1.0 - k, 0.001))));
+}
+float4 ModSoft4(float4 c) { return float4(ModSoft(c.rgb), saturate(c.a)); }
+
 float3 ModGrade(float3 c)
 {
     c = saturate(c);

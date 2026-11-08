@@ -10,10 +10,10 @@
 // ---------------------------------------------------------------- tweakables
 #define EXPOSURE         1.00    // linear brightness multiplier (1 = unchanged)
 #define SHOULDER         0.72    // highlights above this brightness are compressed softly instead of clipping
-#define CONTRAST         0.45    // 0 = off. S-curve in display space: deeper shadows, brighter lights
+#define CONTRAST         0.35    // 0 = off. S-curve in display space: deeper shadows, brighter lights
 #define SATURATION       1.12    // 1 = unchanged
 #define BLOOM_STRENGTH   0.22    // glow around bright areas (sun, clouds, water glints)
-#define BLOOM_THRESHOLD  0.55    // linear brightness where glow starts
+#define BLOOM_THRESHOLD  0.80    // linear brightness where glow starts
 #define AO_STRENGTH      1.80    // 0 = off. Darkens creases, tree bases, building edges
 #define AO_RADIUS        8.0     // metres
 #define AO_FADE_NEAR     1500.0  // metres: AO starts fading ...

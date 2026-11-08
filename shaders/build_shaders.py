@@ -72,6 +72,10 @@ def common_block(o):
         t = fh.read()
     vals = {
         "saturation": "%.4f" % o["grade_saturation"],
+        "air_gamma": "%.4f" % o.get("aircraft_gamma", 0.7),
+        "air_gain": "%.4f" % o.get("aircraft_gain", 1.0),
+        "knee": "%.4f" % o.get("highlight_knee", 1.0),
+        "cloud_gain": "%.4f" % o.get("cloud_gain", 1.0),
         "curve": "%.4f" % o["grade_contrast"],
         "dither": "%.4f" % o["dither"],
         "macro_detail": "%.4f" % o["macro_detail"],
