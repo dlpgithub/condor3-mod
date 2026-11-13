@@ -48,7 +48,7 @@
 //@tune 49 haze_sun_glow 0.15        // forward-scattering glow of the haze towards the sun (Mie phase), 0 = off
 //@tune 50 haze_g 0.76            // anisotropy of that glow (0 = even, 0.9 = tight around the sun)
 //@tune 51 sky_deep 0             // deep blue sky like the MSFS references (0 = off, 1 = full); only the blue sky is darkened, clouds stay white
-//@tune 52 contact_shadow 0.35     // screen-space sun shadows from the depth buffer: grounds trees, buildings, glider (0 = off)
+//@tune 52 contact_shadow 0        // screen-space sun shadows from the depth buffer: grounds trees, buildings, glider (0 = off)
 //@tune 53 contact_dist 30        // how far (metres) the shadow ray travels toward the sun
 //@tune 54 warmth 0.06         // white balance after the LUT: + = warmer (less blue), - = cooler
 //@tune 45 lut_strength 0.75        // colour grading LUT (postfx/lut.cube): 0 = off, 1 = full
