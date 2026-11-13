@@ -63,8 +63,11 @@ static ID3D11Texture2D* g_mainDepth = NULL;   // watched (set by the HUD hook, n
 static ID3D11Texture2D* g_worldCopy = NULL;   // owned
 static unsigned g_clearsThisFrame = 0, g_copiesThisFrame = 0, g_worldValid = 0;
 static int g_clearLogN = 0;
+static unsigned g_clearCalls = 0;          // every call that reaches ClearDsvHook (diagnostics)
+static void* g_clearTarget = NULL;         // function address that was in vtable slot 53 when we hooked
 
 static void STDMETHODCALLTYPE ClearDsvHook(ID3D11DeviceContext* self, ID3D11DepthStencilView* dsv, UINT flags, FLOAT d, UINT8 st) {
+    g_clearCalls++;
     if (dsv && g_mainDepth && g_enabled) {
         ID3D11Resource* res = NULL;
         ID3D11DepthStencilView_GetResource(dsv, &res);
@@ -104,65 +107,178 @@ static void STDMETHODCALLTYPE ClearDsvHook(ID3D11DeviceContext* self, ID3D11Dept
 // FogColor 336, SunPos 352, SunColor 368, AmbientColor 384, Time 400. We copy the interesting parts.
 typedef struct { float view[16]; float camPos[3]; float fog[4]; float sun[3]; float sunColor[4]; float amb[4]; unsigned frame; int valid; } AtmoData;
 static AtmoData g_atmo;
-static unsigned g_updSize[24], g_updCount[24]; static int g_updN = 0;
-typedef void (STDMETHODCALLTYPE *UpdSubFn)(ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT);
-static UpdSubFn g_origUpd = NULL;
-static void STDMETHODCALLTYPE UpdSubHook(ID3D11DeviceContext* self, ID3D11Resource* res, UINT sub, const D3D11_BOX* box, const void* src, UINT rp, UINT dp) {
-    if (res && src && !box) {
-        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-        ID3D11Resource_GetType(res, &dim);
-        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-            D3D11_BUFFER_DESC bd; int i;
-            ID3D11Buffer_GetDesc((ID3D11Buffer*)res, &bd);
-            if (bd.BindFlags & D3D11_BIND_CONSTANT_BUFFER) {
-                for (i = 0; i < g_updN && g_updSize[i] != bd.ByteWidth; i++) {}
-                if (i == g_updN && g_updN < 24) { g_updSize[g_updN] = bd.ByteWidth; g_updCount[g_updN] = 0; g_updN++; }
-                if (i < 24) g_updCount[i]++;
-                if (bd.ByteWidth == 416) {
-                    const float* f = (const float*)src;
-                    float l = sqrtf(f[88] * f[88] + f[89] * f[89] + f[90] * f[90]);
-                    if (fabsf(l - 1.0f) < 0.02f) {
-                        static float patched[104];
-                        memcpy(patched, src, 416);
-                        patched[101] = PfxCore_GetTune(g_core, 40, 0.75f);   // ModP0 terrain/aircraft shadow strength
-                        patched[102] = PfxCore_GetTune(g_core, 41, 0.80f);   // ModP1 hemisphere ambient
-                        patched[103] = PfxCore_GetTune(g_core, 42, 1.20f);   // ModP2 sun gain
-                        patched[83]  = PfxCore_GetTune(g_core, 43, 0.60f);   // ModP3 ambient gain
-                        patched[91]  = PfxCore_GetTune(g_core, 44, 0.75f);   // ModP4 cloud shadow strength
-                        src = patched;
-                        memcpy(g_atmo.view, f, 64); memcpy(g_atmo.camPos, f + 80, 12); memcpy(g_atmo.fog, f + 84, 16);
-                        memcpy(g_atmo.sun, f + 88, 12); memcpy(g_atmo.sunColor, f + 92, 16); memcpy(g_atmo.amb, f + 96, 16);
-                        g_atmo.frame = g_frames; g_atmo.valid = 1;
-                    }
-                }
-            }
+// ---- terrain effect access through Effects11 ---------------------------------------------------------------------
+// The engine builds every effect with D3DX11CreateEffectFromMemory from d3dx11Effects_JSB.dll (plain Effects11 layout,
+// verified against the engine's own call sites). We hook that export, recognise EffectLand by its variable ModP0 and then
+//   (a) set the live parameters ModP0..4 (shadow strength, hemisphere ambient, sun gain, ambient gain, cloud shadow) and
+//   (b) read View / CameraPos / FogColor / SunPos / SunColor / AmbientColor back from the effect's CPU-side copy.
+// No D3D11 context hooks are involved: on Windows the runtime rewrites the context's method table while the game runs,
+// so vtable hooks on UpdateSubresource / Map / ClearDepthStencilView stop working after the first frames.
+#define FX_VT(obj, idx) (((void**)(*(void***)(obj)))[idx])
+typedef unsigned char (__stdcall *FxIsValidFn)(void*);
+typedef void*         (__stdcall *FxGetByNameFn)(void*, const char*);
+typedef void*         (__stdcall *FxAsFn)(void*);
+typedef long          (__stdcall *FxSetFloatFn)(void*, float);
+typedef long          (__stdcall *FxGetFloatFn)(void*, float*);
+typedef long          (__stdcall *FxSetPtrFn)(void*, const float*);
+typedef long          (__stdcall *FxGetPtrFn)(void*, float*);
+typedef unsigned long (__stdcall *FxRefFn)(void*);
+enum {
+    FXE_GETVARIABLEBYNAME = 9,                                    // ID3DX11Effect
+    FXV_ISVALID = 0, FXV_ASSCALAR = 10, FXV_ASVECTOR = 11, FXV_ASMATRIX = 12,   // ID3DX11EffectVariable
+    FXS_SETFLOAT = 28, FXS_GETFLOAT = 29,                         // ID3DX11EffectScalarVariable
+    FXVEC_SETFLOATVECTOR = 30, FXVEC_GETFLOATVECTOR = 33,         // ID3DX11EffectVectorVariable
+    FXM_SETMATRIX = 28, FXM_GETMATRIX = 29                        // ID3DX11EffectMatrixVariable
+};
+typedef struct { void* effect; void* modp[5]; void* view; void* camPos; void* fog; void* sunPos; void* sunColor; void* amb; int selfTest; } FxLand;
+static FxLand g_fx;
+static int    g_fxHookState = 0;     // 0 = not installed yet, 1 = installed, <0 = failed
+typedef HRESULT (__stdcall *CreateFxFn)(const void*, SIZE_T, UINT, void*, void**);
+static CreateFxFn g_origCreateFx = NULL;
+
+static void* FxVar(void* effect, const char* name, int asIdx) {
+    void* v = ((FxGetByNameFn)FX_VT(effect, FXE_GETVARIABLEBYNAME))(effect, name);
+    void* r;
+    if (!v || !((FxIsValidFn)FX_VT(v, FXV_ISVALID))(v)) return NULL;
+    if (!asIdx) return v;
+    r = ((FxAsFn)FX_VT(v, asIdx))(v);
+    if (!r || !((FxIsValidFn)FX_VT(r, FXV_ISVALID))(r)) return NULL;
+    return r;
+}
+
+// Round trip through the Set/Get slots we rely on: proves the vtable offsets before anything else uses them.
+static int FxSelfTest(const FxLand* n) {
+    float a = 0.4321f, b = -1.0f, vin[4] = { 0.25f, 0.5f, 0.75f, 1.0f }, vout[4] = { 0, 0, 0, 0 }, min[16], mout[16];
+    int i, ok = 1;
+    ((FxSetFloatFn)FX_VT(n->modp[0], FXS_SETFLOAT))(n->modp[0], a);
+    ((FxGetFloatFn)FX_VT(n->modp[0], FXS_GETFLOAT))(n->modp[0], &b);
+    if (fabsf(a - b) > 1e-6f) ok = 0;
+    if (n->fog) {
+        ((FxSetPtrFn)FX_VT(n->fog, FXVEC_SETFLOATVECTOR))(n->fog, vin);
+        ((FxGetPtrFn)FX_VT(n->fog, FXVEC_GETFLOATVECTOR))(n->fog, vout);
+        for (i = 0; i < 4; i++) if (fabsf(vin[i] - vout[i]) > 1e-6f) ok = 0;
+    }
+    if (n->view) {
+        for (i = 0; i < 16; i++) { min[i] = (float)(i + 1); mout[i] = 0; }
+        ((FxSetPtrFn)FX_VT(n->view, FXM_SETMATRIX))(n->view, min);
+        ((FxGetPtrFn)FX_VT(n->view, FXM_GETMATRIX))(n->view, mout);
+        for (i = 0; i < 16; i++) if (fabsf(min[i] - mout[i]) > 1e-6f) ok = 0;
+    }
+    return ok;
+}
+
+static void FxCapture(void* effect) {
+    FxLand n; int i; char nm[8]; void* old;
+    if (!effect) return;
+    memset(&n, 0, sizeof n);
+    n.modp[0] = FxVar(effect, "ModP0", FXV_ASSCALAR);
+    if (!n.modp[0]) return;                                       // not the terrain effect
+    for (i = 1; i < 5; i++) { _snprintf(nm, sizeof nm, "ModP%d", i); n.modp[i] = FxVar(effect, nm, FXV_ASSCALAR); }
+    n.view = FxVar(effect, "View", FXV_ASMATRIX);
+    n.camPos = FxVar(effect, "CameraPos", FXV_ASVECTOR);
+    n.fog = FxVar(effect, "FogColor", FXV_ASVECTOR);
+    n.sunPos = FxVar(effect, "SunPos", FXV_ASVECTOR);
+    n.sunColor = FxVar(effect, "SunColor", FXV_ASVECTOR);
+    n.amb = FxVar(effect, "AmbientColor", FXV_ASVECTOR);
+    n.selfTest = (FxVar(effect, "ZzNoSuchVariable", 0) == NULL) && FxSelfTest(&n);
+    if (g_logf) {
+        fprintf(g_logf, "postfx: terrain effect %p: ModP %p %p %p %p %p view %p camPos %p fog %p sunPos %p sunColor %p amb %p selfTest %d\n",
+                effect, n.modp[0], n.modp[1], n.modp[2], n.modp[3], n.modp[4], n.view, n.camPos, n.fog, n.sunPos, n.sunColor, n.amb, n.selfTest);
+        fflush(g_logf);
+    }
+    if (!n.selfTest) return;                                      // unexpected vtable layout: leave the effect alone
+    ((FxRefFn)FX_VT(effect, 1))(effect);                          // AddRef: keep the effect (and our variable pointers) alive
+    n.effect = effect;
+    old = g_fx.effect;
+    g_fx = n;
+    if (old) ((FxRefFn)FX_VT(old, 2))(old);                       // Release the previous one
+}
+
+static HRESULT __stdcall CreateFxHook(const void* data, SIZE_T len, UINT flags, void* dev, void** ppEffect) {
+    HRESULT hr = g_origCreateFx(data, len, flags, dev, ppEffect);
+    if (SUCCEEDED(hr) && ppEffect && *ppEffect) FxCapture(*ppEffect);
+    return hr;
+}
+
+static int InstallFxHook(void) {
+    HMODULE h = GetModuleHandleA("d3dx11Effects_JSB.dll");
+    void* p;
+    if (!h) return 0;
+    p = (void*)GetProcAddress(h, "D3DX11CreateEffectFromMemory");
+    if (!p) return -1;
+    return DobbyHook(p, (dobby_dummy_func_t)CreateFxHook, (dobby_dummy_func_t*)&g_origCreateFx) == 0 ? 1 : -2;
+}
+
+// once per frame (HudPre): push the live parameters into the terrain effect and read the atmosphere back
+static void FxFrame(void) {
+    static const int   slot[5] = { 40, 41, 42, 43, 44 };
+    static const float def[5]  = { 0.75f, 0.80f, 1.20f, 0.60f, 0.75f };
+    void* e = g_fx.effect;
+    float m[16], c[4], sp[4], sc[4], am[4], fg[4], l;
+    int i, j;
+    if (!e) return;
+    for (i = 0; i < 5; i++) if (g_fx.modp[i]) ((FxSetFloatFn)FX_VT(g_fx.modp[i], FXS_SETFLOAT))(g_fx.modp[i], PfxCore_GetTune(g_core, slot[i], def[i]));
+    if (!g_fx.view || !g_fx.camPos || !g_fx.fog || !g_fx.sunPos || !g_fx.sunColor || !g_fx.amb) return;
+    memset(m, 0, sizeof m); memset(c, 0, sizeof c); memset(sp, 0, sizeof sp); memset(sc, 0, sizeof sc); memset(am, 0, sizeof am); memset(fg, 0, sizeof fg);
+    ((FxGetPtrFn)FX_VT(g_fx.view, FXM_GETMATRIX))(g_fx.view, m);
+    ((FxGetPtrFn)FX_VT(g_fx.camPos, FXVEC_GETFLOATVECTOR))(g_fx.camPos, c);
+    ((FxGetPtrFn)FX_VT(g_fx.fog, FXVEC_GETFLOATVECTOR))(g_fx.fog, fg);
+    ((FxGetPtrFn)FX_VT(g_fx.sunPos, FXVEC_GETFLOATVECTOR))(g_fx.sunPos, sp);
+    ((FxGetPtrFn)FX_VT(g_fx.sunColor, FXVEC_GETFLOATVECTOR))(g_fx.sunColor, sc);
+    ((FxGetPtrFn)FX_VT(g_fx.amb, FXVEC_GETFLOATVECTOR))(g_fx.amb, am);
+    l = sqrtf(sp[0] * sp[0] + sp[1] * sp[1] + sp[2] * sp[2]);
+    if (fabsf(l - 1.0f) >= 0.02f) return;                         // the engine has not filled the per-frame values yet
+    // GetMatrix returns the application (row-major) matrix; the shader constant buffer holds its transpose
+    for (i = 0; i < 4; i++) for (j = 0; j < 4; j++) g_atmo.view[i * 4 + j] = m[j * 4 + i];
+    memcpy(g_atmo.camPos, c, 12); memcpy(g_atmo.fog, fg, 16); memcpy(g_atmo.sun, sp, 12);
+    memcpy(g_atmo.sunColor, sc, 16); memcpy(g_atmo.amb, am, 16);
+    g_atmo.frame = g_frames; g_atmo.valid = 1;
+    {
+        static int once = 0;
+        if (!once && g_logf) {
+            once = 1;
+            fprintf(g_logf, "postfx: atmosphere from effect: view[12..15] %.3f %.3f %.3f %.3f (expect 0 0 0 1) sunDir %.3f %.3f %.3f camPos %.1f %.1f %.1f\n",
+                    g_atmo.view[12], g_atmo.view[13], g_atmo.view[14], g_atmo.view[15], sp[0], sp[1], sp[2], c[0], c[1], c[2]);
+            fflush(g_logf);
         }
     }
-    g_origUpd(self, res, sub, box, src, rp, dp);
-}
-static int g_updHooked = 0;
-static void HookUpd(ID3D11DeviceContext* ctx) {
-    void** vt; DWORD old;
-    if (g_updHooked || !ctx) return;
-    g_updHooked = 1;
-    vt = *(void***)ctx;
-    if (!VirtualProtect(&vt[48], sizeof(void*), PAGE_READWRITE, &old)) return;
-    g_origUpd = (UpdSubFn)vt[48];
-    vt[48] = (void*)UpdSubHook;
-    VirtualProtect(&vt[48], sizeof(void*), old, &old);
 }
 
 static int g_clearHooked = 0;
+static int IsWine(void) {
+    HMODULE n = GetModuleHandleA("ntdll.dll");
+    return n && GetProcAddress(n, "wine_get_version") != NULL;
+}
 static void HookClear(ID3D11DeviceContext* ctx) {
-    void** vt; DWORD old;
+    void** vt; DWORD old; int inl = 0;
     if (g_clearHooked || !ctx) return;
     g_clearHooked = 1;
     vt = *(void***)ctx;
-    if (!VirtualProtect(&vt[VT_CLEAR_DSV], sizeof(void*), PAGE_READWRITE, &old)) { if (g_logf) { fprintf(g_logf, "postfx: VirtualProtect failed\n"); fflush(g_logf); } return; }
-    g_origClear = (ClearDsvFn)vt[VT_CLEAR_DSV];
-    vt[VT_CLEAR_DSV] = (void*)ClearDsvHook;
-    VirtualProtect(&vt[VT_CLEAR_DSV], sizeof(void*), old, &old);
-    if (g_logf) { fprintf(g_logf, "postfx: ClearDepthStencilView hooked (vtable %p, orig %p)\n", (void*)vt, (void*)g_origClear); fflush(g_logf); }
+    g_clearTarget = vt[VT_CLEAR_DSV];
+    if (!IsWine()) {
+        // native Windows: the D3D11 runtime rewrites the context's method table while the game runs, so a vtable patch
+        // only survives the first frames. Detour the function itself instead.
+        int r;
+        g_origClear = NULL;
+        r = DobbyHook(g_clearTarget, (dobby_dummy_func_t)ClearDsvHook, (dobby_dummy_func_t*)&g_origClear);
+        inl = (r == 0 && g_origClear != NULL);
+        if (g_logf) { fprintf(g_logf, "postfx: ClearDepthStencilView inline hook %s (target %p, trampoline %p, vtable %p, r=%d)\n", inl ? "OK" : "FAILED", g_clearTarget, (void*)g_origClear, (void*)vt, r); fflush(g_logf); }
+    }
+    if (!inl) {
+        if (!VirtualProtect(&vt[VT_CLEAR_DSV], sizeof(void*), PAGE_READWRITE, &old)) { if (g_logf) { fprintf(g_logf, "postfx: VirtualProtect failed\n"); fflush(g_logf); } return; }
+        g_origClear = (ClearDsvFn)vt[VT_CLEAR_DSV];
+        vt[VT_CLEAR_DSV] = (void*)ClearDsvHook;
+        VirtualProtect(&vt[VT_CLEAR_DSV], sizeof(void*), old, &old);
+        if (g_logf) { fprintf(g_logf, "postfx: ClearDepthStencilView hooked via vtable (vtable %p, orig %p)\n", (void*)vt, (void*)g_origClear); fflush(g_logf); }
+    }
+}
+// current content of vtable slot 53 (diagnostics: does the runtime put the same function back?)
+static void* CurClearEntry(uint32_t ctx) {
+    void** vt;
+    if (!ctx || IsBadReadPtr((void*)(uintptr_t)ctx, 4)) return NULL;
+    vt = *(void***)(uintptr_t)ctx;
+    if (!vt || IsBadReadPtr(&vt[VT_CLEAR_DSV], 4)) return NULL;
+    return vt[VT_CLEAR_DSV];
 }
 
 
@@ -212,6 +328,8 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
 
     Key(VK_F8, &kF8, &e8); Key(VK_F9, &kF9, &e9); Key(VK_F10, &kF10, &e10);
     if (e9) { g_enabled = !g_enabled; DBGLOG("postfx: %s", g_enabled ? "on" : "off"); if (g_logf) { fprintf(g_logf, "postfx: %s\n", g_enabled ? "on" : "off"); fflush(g_logf); } }
+    // live parameters for the terrain shader + atmosphere read-back: independent of F9 and of the lookups below
+    FxFrame();
     if (!g_enabled) return;
 
     if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_DEVICE_VAR), &dev) || !dev) { Diag("postfx: no device"); return; }
@@ -225,7 +343,6 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
     if (!color || !depth || !rtv) return;
     g_mainDepth = (ID3D11Texture2D*)(uintptr_t)depth;
     HookClear((ID3D11DeviceContext*)(uintptr_t)ctx);
-    HookUpd((ID3D11DeviceContext*)(uintptr_t)ctx);
     if (!ReadProjection(&cam)) { Diag("postfx: projection rejected"); return; }
     cam.time = (float)(GetTickCount() % 3600000u) / 1000.0f;
     memset(cam.view, 0, sizeof cam.view);
@@ -265,7 +382,7 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
                     (ID3D11RenderTargetView*)(uintptr_t)rtv, (ID3D11Texture2D*)(uintptr_t)depth,
                     (g_worldCopy && g_worldValid && g_copiesThisFrame >= 2) ? g_worldCopy : NULL, &cam)) {   // 1 clear/frame (external view, no cockpit pass): the copy is last frame's depth, the live depth already is the world
         g_fails = 0;
-        if (g_logf && (g_frames % 300) == 2) { fprintf(g_logf, "postfx: frame %u: %u clears, %u world copies\n", g_frames, g_clearsThisFrame, g_copiesThisFrame); fflush(g_logf); }
+        if (g_logf && (g_frames % 300) == 2) { fprintf(g_logf, "postfx: frame %u: %u clears, %u world copies, clearCalls %u, vt53 %p (hooked target %p)\n", g_frames, g_clearsThisFrame, g_copiesThisFrame, g_clearCalls, CurClearEntry(ctx), g_clearTarget); fflush(g_logf); }
     } else if (++g_fails > 600) {
         g_dead = 1;     // e.g. unsupported formats: stop trying, the game keeps running unmodified
         if (g_logf) { fprintf(g_logf, "postfx: giving up after repeated failures\n"); fflush(g_logf); }
@@ -551,6 +668,10 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
     for (;;) {
         FILE* f; char* lines[64]; int n = 0, i;
         Sleep(200);
+        if (g_fxHookState == 0) {                                   // Effects11 DLL was not loaded when we started: retry
+            g_fxHookState = InstallFxHook();
+            if (g_fxHookState != 0 && g_logf) { fprintf(g_logf, "postfx: Effects11 hook state %d (retry)\n", g_fxHookState); fflush(g_logf); }
+        }
         f = fopen(path, "r");
         if (!f) continue;
         while (n < 64 && fgets(line, sizeof line, f)) { lines[n] = _strdup(line); n++; }
@@ -566,7 +687,7 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
             else if (!_stricmp(c, "atmo")) {
                 int q;
                 RLog("atmo: valid=%d frame=%u (now %u)", g_atmo.valid, g_atmo.frame, g_frames);
-                for (q = 0; q < g_updN; q++) RLog("  cbuffer size %u: %u updates", g_updSize[q], g_updCount[q]);
+                RLog("  effects hook %d, terrain effect %p, selfTest %d", g_fxHookState, g_fx.effect, g_fx.selfTest);
                 RLog("  view row0 %.4f %.4f %.4f %.4f", g_atmo.view[0], g_atmo.view[1], g_atmo.view[2], g_atmo.view[3]);
                 RLog("  camPos %.1f %.1f %.1f  fog %.3f %.3f %.3f %.3f", g_atmo.camPos[0], g_atmo.camPos[1], g_atmo.camPos[2], g_atmo.fog[0], g_atmo.fog[1], g_atmo.fog[2], g_atmo.fog[3]);
                 RLog("  sunDir %.4f %.4f %.4f  sunCol %.3f %.3f %.3f %.3f  amb %.3f %.3f %.3f %.3f", g_atmo.sun[0], g_atmo.sun[1], g_atmo.sun[2], g_atmo.sunColor[0], g_atmo.sunColor[1], g_atmo.sunColor[2], g_atmo.sunColor[3], g_atmo.amb[0], g_atmo.amb[1], g_atmo.amb[2], g_atmo.amb[3]);
@@ -627,6 +748,9 @@ void InstallPostFX(void) {
     _snprintf(logp, sizeof logp, "%s\\postfx.log", g_dir);
     g_logf = fopen(logp, "w");
     if (g_logf) PfxSetLog(g_logf);
+
+    g_fxHookState = InstallFxHook();
+    if (g_logf) { fprintf(g_logf, "postfx: Effects11 hook state %d (1 = installed, 0 = DLL not loaded yet)\n", g_fxHookState); fflush(g_logf); }
 
     target = IdaAddrToRuntime(ADDR_HUD_DRAW);
     r = DobbyInstrument(target, HudPre);
