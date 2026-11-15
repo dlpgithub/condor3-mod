@@ -76,3 +76,15 @@ Synthetic landscape: `tools/make_landscape.py` (own height function, own texture
 - Wrong values in `.tha`/`.fha` (+5000 on every hash) load without any log message or visible effect in the test flight (hash only gates the cached-validity flags; see above).
 - Texture orientation confirmed in game (world-quadrant tint test, heading 065: NE ahead-left, SE ahead-right): north-up, column 0 = west, row 0 = north.
 - Tool pitfall: `make_landscape.py OUT NAME` takes the landscape directory itself (`.../Landscapes/Synth8`), not the Landscapes folder.
+
+## Facts from the official guides (Landscape Guide rev2 = V2 text, AirportsInV3.pdf; toolkit in ~/Downloads/landscape-toolkit)
+- Hierarchy: patch = 5760 m (192 x 30 m), tile = 4x4 patches = 23040 m (768 x 30 m). Official tile/patch names are CCRR, origin 0000 = bottom-right (SE) corner, counted west and north: same as our tx,ty.
+- Landscape size must be a whole multiple of 5760 m. Glider cannot fly closer than ~5 km (one patch) to the border.
+- Patch texture standard 2048 px (2.8125 m/px), may be larger for airport patches; alpha channel of the texture = water mask.
+- Forest maps: two classes, coniferous and deciduous (our .for values 1/2), up to 2048 px per TILE = 512 px per patch (our 512x512); black = no trees.
+- Thermal map: grayscale, 90 m/px (256 px per tile); black = no thermals, white = strongest; used together with "flats activity". Reference values: water 0, deciduous 64, forest/grass 102, fields 178. Our .tm3 is stored RGB (786432 B = 512*512*3 for 2x2 tiles).
+- THA/FHA: mandatory; mismatch is treated as cheating (free flight and multiplayer). `LandscapeEditor.exe -hash <Landscape>` regenerates both. (Our test with wrong hashes showed no log message, but do not rely on that: always write correct hashes.)
+- INI: only `Version` and `RealtimeShading` (0 disables real-time terrain shading).
+- Waypoints: `<Name>.cup` (SeeYou format); Condor drops waypoints outside the landscape at flight start.
+- Objects: `World/Objects/*.c3d` + `World/Objects/Textures/`; airports: `Airports/<Name>G.c3d` (ground; Grass, Asphalt, Grasspaint, Asphaltpaint, V3: Grass3D, AsphaltPaintYellow, Gravel) + `<Name>O.c3d` (crashable objects, up to 3 windsocks as proxy triangles Windsack1..3). V3: G file mandatory (missing -> blue screen); airport runway axis is local +X; 22.5 m `HeightMaps/22.5m/hXXYY.tr3f` for the airport patch; G-file surfaces are cut from that terrain with Z=0 at runway centre; sub-texture dds (8.8.8.8 ARGB, alpha = grass length) mapped on Grass3D/Asphalt.
+- Official pipeline: OBJ (Y forward, Z up, triangulated) -> ObjectEditor -> C3D; LandscapeEditor imports BMP tile textures (8192 px/tile), exports tr3/for/tm3/dds/hash.
