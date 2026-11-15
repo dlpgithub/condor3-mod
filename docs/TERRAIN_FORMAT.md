@@ -30,3 +30,16 @@ idx  = 48*tx + ty                            # tileCountY*tx+ty
 ```
 Verified: .fha 2871/2880 exact, rest off by 1; .tha same (tr3f used when present). Loader accepts |diff|<=1; mismatch only clears a "valid" flag (L+0x38 heights, L+0x40 forest).
 Custom landscape: just generate the tables with this formula (tools/terrain_hash.py).
+
+## Textures (FUN_0076c9d0, verified on all 2814 Slovenia3 tiles)
+- Path: `<landscape dir>\Textures\t` + `%03d%03d.dds` else `%02d%02d.dds` (tile x, y), else `Textures\empty.dds` (256x256 DXT3). Slovenia3 has 2814 of 2880 tile textures; missing tiles use empty.dds.
+- Plain DDS: magic `DDS `, 124-byte header, then ALL mips down to 1x1 (levels = log2(size)+1). Width must equal height and be non-zero.
+- Pixel format must be fourcc `DXT1` (BC1, 8 B/block) or `DXT3` (BC2, 16 B/block). **DXT5 is rejected.**
+- File size must equal exactly `128 + sum over mips of max(1,(s+3)/4)^2 * blockbytes` (s halves each level), else the tile is rejected.
+- Seen sizes: 2048 (DXT1/DXT3), 4096, 8192 (14 mips). Loader creates an immutable D3D11 texture skipping the top `lod + 2 - TextureQuality` mips, so different tile distances use smaller mips.
+- Residency (FUN_0076d094): tiles with Chebyshev distance to camera tile <4 load LOD 0, <7 LOD 1, <11 LOD 2, otherwise unloaded.
+
+## Open items
+- Geo "calibration" check ("Landscape not correctly calibrated.", code at 0x6aeeb0, not a Ghidra function): compares fabs() of floats at [[0x792a68]+0x4750/+0x4754] with 80.0 and 100.0 and another with 6000.0. Meaning not yet decoded.
+- `.tm3` consumer, `LandscapeOrigin` is only an FX parameter name (shader), not a file field.
+- Landscape enumeration (`Landscapes\*.*`, "Checking landscapes", xref 0x6a8747), registry key `Software\Condor3\Landscapes\` (license key), "not registered -> demo" message at 0x830272.
