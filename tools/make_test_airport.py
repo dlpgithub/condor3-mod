@@ -32,7 +32,7 @@ def main(ld, lat, lon, elev, ddir, name='Testfield'):
     objs_g = []
     v, i = quad(-600, -300, 600, 300, z=-0.3)
     objs_g.append(dict(name='Grass3D', texture='Textures\\Testfield\\Grass.dds', color=(1, 1, 1, 1), params=(0, 0, 0), vertices=v, indices=i))
-    v, i = quad(-450, -25, 450, 25, z=0.2)
+    v, i = quad(-25, -450, 25, 450, z=0.2)   # runway along local +Y (stock airports)
     objs_g.append(dict(name='Asphalt', texture='Textures\\Testfield\\Muck.dds', color=(1, 1, 1, 1), params=(0, 0, 0), vertices=v, indices=i))
     g = c3d.build(objs_g)
     open(f'{ld}/Airports/{name}G.c3d', 'wb').write(c3d.write(g))

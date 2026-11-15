@@ -138,3 +138,8 @@ Next: control experiment (copy a real AigenG.c3d + textures under the Testfield 
 - Axis puzzle: stock Asphalt/GrassPaint meshes lie mostly along local **+Y** (principal axis ~90 deg in 25 of 32 airports, independent of the apt `direction`), but our test (strip along +X, boxes at y=+-60) looked aligned with the glider heading 065. Not yet reconciled; test with real AigenG/O under the Testfield name shows glider on photo ground heading 065.
 - `Airports/<Name>.grs` (Testfield.grs, 843 KB) was created by the game itself at runtime -> it is a generated cache (size scales with ground area), not required input.
 - Paused game: `move` changes the HUD altitude but the frame is not redrawn; unpausing is needed (P toggles; check the PAUSE text first).
+
+### World axes for `move` / remote control (measured)
+Glider world position (double x,y,z at object+0x6d8): **+x = WEST, +y = NORTH, z up** (moving x by +224 changed the HUD longitude by -0.003 deg, y by +113.6 changed latitude by +0.001). 1 unit = 1 m. This matches the terrain georeference (x west, y north). Quick-toggle technique: `move ...`, `kkey P`, `kkey P` in one cmd.txt redraws the paused frame.
+Glider/pole collision ("collided with ground object") at the airport origin confirms the .apt lat/lon places the O objects correctly.
+Axis of local C3D frame vs runway heading is still unresolved (see above).
