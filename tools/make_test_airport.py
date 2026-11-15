@@ -29,8 +29,12 @@ def box(cx, cy, w, d, h):
 
 def main(ld, lat, lon, elev, ddir, name='Testfield'):
     os.makedirs(f'{ld}/Airports', exist_ok=True)
-    v, i = quad(-450, -25, 450, 25, z=0.15)   # 15 cm above the terrain: at z=0 the flat terrain wins (z-fight)
-    g = c3d.build([dict(name='Asphalt', texture='', color=(0.7, 0.7, 0.7, 1), params=(0, 0, 0), vertices=v, indices=i)])
+    objs_g = []
+    v, i = quad(-600, -300, 600, 300, z=-0.3)
+    objs_g.append(dict(name='Grass3D', texture='Textures\\Testfield\\Grass.dds', color=(1, 1, 1, 1), params=(0, 0, 0), vertices=v, indices=i))
+    v, i = quad(-450, -25, 450, 25, z=0.2)
+    objs_g.append(dict(name='Asphalt', texture='Textures\\Testfield\\Muck.dds', color=(1, 1, 1, 1), params=(0, 0, 0), vertices=v, indices=i))
+    g = c3d.build(objs_g)
     open(f'{ld}/Airports/{name}G.c3d', 'wb').write(c3d.write(g))
     objs = []
     for nm, cx, cy, h, col in (('RedBox', 0, -60, 8, (1, 0, 0, 1)), ('BlueBox', 0, 60, 8, (0, 0, 1, 1)), ('Block', 150, 90, 8, (0.6, 0.6, 0.6, 1)),
