@@ -88,3 +88,15 @@ Synthetic landscape: `tools/make_landscape.py` (own height function, own texture
 - Waypoints: `<Name>.cup` (SeeYou format); Condor drops waypoints outside the landscape at flight start.
 - Objects: `World/Objects/*.c3d` + `World/Objects/Textures/`; airports: `Airports/<Name>G.c3d` (ground; Grass, Asphalt, Grasspaint, Asphaltpaint, V3: Grass3D, AsphaltPaintYellow, Gravel) + `<Name>O.c3d` (crashable objects, up to 3 windsocks as proxy triangles Windsack1..3). V3: G file mandatory (missing -> blue screen); airport runway axis is local +X; 22.5 m `HeightMaps/22.5m/hXXYY.tr3f` for the airport patch; G-file surfaces are cut from that terrain with Z=0 at runway centre; sub-texture dds (8.8.8.8 ARGB, alpha = grass length) mapped on Grass3D/Asphalt.
 - Official pipeline: OBJ (Y forward, Z up, triangulated) -> ObjectEditor -> C3D; LandscapeEditor imports BMP tile textures (8192 px/tile), exports tr3/for/tm3/dds/hash.
+
+## Solved from the official LandscapeEditor.exe (disassembled; Delphi, strings sit right after their function)
+### .aha
+`<name>.aha` = decimal number written as a text line: the same hash function as .tha/.fha applied to the bytes of `<name>.air` (airspace file) with idx = 0:
+`round((sum(byte+1)) * LCG(0+0x14A68F2) / 2^32)` (function 0x49ec30, LCG `x = x*0x41C64E6D+1`, see terrain_hash.py). Empty .air -> `0`. Missing .air -> editor error "*.air file not found".
+### .tm3 (thermal/terrain map, 90 m cells) -- tools/make_tm3.py reproduces Slovenia3.tm3 exactly (<=1 LSB in <0.5% of cells)
+Layout `tm3[y][x][3]`, y=0 south edge, x=0 east edge (pairs with trn[x][y]); size = W*H*3 (W,H of the .trn).
+- byte0: thermal map value from `Working/ThermalMap/ThermalMap.bmp` (grayscale; 0 none ... 255 max; bitmap is north-up/west-left)
+- byte1: clamp(stddev of heights in a disk * 0.01, 0, 1)*255 (terrain roughness)
+- byte2: clamp(mean((h0-h)/dist) * 0.005, -0.5, 0.5)*254 + 127 (mean slope toward the neighbourhood; ~127 = flat)
+- disk = offsets (i,j), i^2+j^2<=64, sampled at (x+2i, y+2j) (cells outside the map skipped); dist = sqrt(i^2+j^2).
+The game requires the file (missing -> shutdown right after "Initializing Thermals").

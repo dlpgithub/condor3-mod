@@ -126,11 +126,9 @@ def main(out, name, src):
     for e in ('obj', 'cup', 'air'): open(f'{out}/{name}.{e}', 'wb').write(b'')
     open(f'{out}/{name}.cup', 'wb').write(b'name,code,country,lat,lon,elev,style,rwdir,rwlen,freq,desc\r\n')
     # map images: tm3 (rows y, cols x) and bmp (north-up, west-left, bottom-up BGRA)
-    X = (np.arange(nx*64)+.5)*90.0; Y = (np.arange(ny*64)+.5)*90.0
-    hm = H(X[None, :], Y[:, None])                                     # [y][x]
-    t = np.clip((hm-BASE)/900, 0, 1)[..., None]
-    rgb = ((1-t)*np.array([90, 140, 60.])+t*np.array([170, 150, 120.])).astype(np.uint8)
-    rgb.tofile(f'{out}/{name}.tm3')
+    # thermal/terrain map: ch0 = thermal value (flat 102 = "forest/grass"), ch1/ch2 derived from the 90 m heights (see make_tm3.py)
+    from make_tm3 import make_tm3
+    make_tm3(trn.astype(np.uint16), 102).tofile(f'{out}/{name}.tm3')
     sb = open(f'{src}/{os.path.basename(src)}.bmp', 'rb').read(54)
     bh = bytearray(sb); struct.pack_into('<ii', bh, 18, nx*64, ny*64); struct.pack_into('<I', bh, 34, nx*64*ny*64*4); struct.pack_into('<I', bh, 2, 54+nx*64*ny*64*4)
     bgra = np.dstack([rgb[..., 2], rgb[..., 1], rgb[..., 0], np.full(rgb.shape[:2], 255, np.uint8)])   # row 0 = south
