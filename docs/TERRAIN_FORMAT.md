@@ -43,3 +43,10 @@ Custom landscape: just generate the tables with this formula (tools/terrain_hash
 - Geo "calibration" check ("Landscape not correctly calibrated.", code at 0x6aeeb0, not a Ghidra function): compares fabs() of floats at [[0x792a68]+0x4750/+0x4754] with 80.0 and 100.0 and another with 6000.0. Meaning not yet decoded.
 - `.tm3` consumer, `LandscapeOrigin` is only an FX parameter name (shader), not a file field.
 - Landscape enumeration (`Landscapes\*.*`, "Checking landscapes", xref 0x6a8747), registry key `Software\Condor3\Landscapes\` (license key), "not registered -> demo" message at 0x830272.
+
+## Landscape discovery (flight planner init, FUN_006a849c)
+Enumerates `Landscapes\*.*` directories (skips `.` and `..`), requires `Landscapes\<N>\<N>.ini` to exist, reads `[General] Version` as an **integer** (default 0). Version==0 (absent or non-integer such as `1.02`) -> landscape is added to the list; a valid integer value -> an error message is shown instead. So a custom landscape just needs a folder + ini copied from an existing one (`Version=1.02`). No registry key is needed to be listed (registry `Software\Condor3\Landscapes\` is only the license/registration -> otherwise "Running demo version").
+
+## .apt airport records (Slovenia3.apt, 39 records x 72 bytes, no header)
+`[0]` name length, `[1..35]` name padded with spaces (36 B), `+0x24` f32 latitude (deg N), `+0x28` f32 longitude (deg E), `+0x2c` f32 elevation m, `+0x30` u32 (unknown), `+0x34` u16 (700-1060, probably runway length m), `+0x38` u32 (25..100, probably width/other), `+0x40` f32 (~118-123, radio frequency MHz), `+0x44` 4 bytes flags. Lat/lon here are geographic degrees (Aigen 47.536, 14.141) -> the landscape is georeferenced via the .trn UTM origin (zone 33N, E 645120, N 5022720).
+Per airport: `Airports/<Name>.grs` (~21 MB), `<Name>G.c3d` (ground 3D, 'C3D' magic + ascii chunks like "Grass3D"), `<Name>O.c3d` (objects).
