@@ -135,7 +135,7 @@ Next: control experiment (copy a real AigenG.c3d + textures under the Testfield 
 - `Grass3D` replaces the satellite terrain texture around the airport (texture vanishes when approaching, returns with distance). Stock `<Airport>_Grass.dds` is an UNCOMPRESSED 32-bit aerial photo (Aigen: 1840x1236, no mips); Grass3D UVs are a planar projection of the ground area onto that photo (Aigen: u 0.146-0.962, v 0.013-0.982 over ~610x1110 m).
 - Stock `Asphalt` object texture is the per-airport `*Muck.dds` (DXT1 1024^2, mips); its UVs are also a planar projection over the asphalt area. Base asphalt/paint/gravel come from `Airports/Textures/{Asphalt,AsphaltPaint,Gravel,...}.dds` (landscape-relative).
 - Object names are semantic: Asphalt, AsphaltPaint, AsphaltPaintYellow, Grass, GrassPaint, Gravel, Grass3D (found by name in Condor.exe).
-- Axis puzzle: stock Asphalt/GrassPaint meshes lie mostly along local **+Y** (principal axis ~90 deg in 25 of 32 airports, independent of the apt `direction`), but our test (strip along +X, boxes at y=+-60) looked aligned with the glider heading 065. Not yet reconciled; test with real AigenG/O under the Testfield name shows glider on photo ground heading 065.
+- (RESOLVED below) Axis puzzle: stock Asphalt/GrassPaint meshes lie mostly along local **+Y** (principal axis ~90 deg in 25 of 32 airports, independent of the apt `direction`), but our test (strip along +X, boxes at y=+-60) looked aligned with the glider heading 065. Not yet reconciled; test with real AigenG/O under the Testfield name shows glider on photo ground heading 065.
 - `Airports/<Name>.grs` (Testfield.grs, 843 KB) was created by the game itself at runtime -> it is a generated cache (size scales with ground area), not required input.
 - Paused game: `move` changes the HUD altitude but the frame is not redrawn; unpausing is needed (P toggles; check the PAUSE text first).
 
@@ -143,3 +143,15 @@ Next: control experiment (copy a real AigenG.c3d + textures under the Testfield 
 Glider world position (double x,y,z at object+0x6d8): **+x = WEST, +y = NORTH, z up** (moving x by +224 changed the HUD longitude by -0.003 deg, y by +113.6 changed latitude by +0.001). 1 unit = 1 m. This matches the terrain georeference (x west, y north). Quick-toggle technique: `move ...`, `kkey P`, `kkey P` in one cmd.txt redraws the paused frame.
 Glider/pole collision ("collided with ground object") at the airport origin confirms the .apt lat/lon places the O objects correctly.
 Axis of local C3D frame vs runway heading is still unresolved (see above).
+
+### C3D local frame of airports -- SOLVED (session 3, verified in game with tools/make_airport.py)
+- **+Y = along the runway heading** (clockwise from north, `.apt` direction), **+X = LEFT of the heading**, +Z up, origin = `.apt` lat/lon, Z=0 = `.apt` elevation.
+  World (x west, y north): `world = origin + x*(cosH, sinH) + y*(-sinH, cosH)`.
+- Evidence: in all stock airports the Grass3D/GrassPaint/Asphalt UVs are an exact affine function of (x,y) (max error 0.0000); the photo is a north-up aerial image: u grows to the east, v to the south, ~0.7 m/px
+  (Aigen: 1840x1236 px photo for a 1295x869 m area). Expressing east/south in local coordinates gives (-cosH, sinH) / (-sinH, -cosH), i.e. x = left, y = forward.
+- In-game check: markers at (+-37, +-450) appear at the runway ends, left markers on the left side of the heading; glider at local (10.5, -251) is placed correctly by `move`.
+- **The F2 "external view" camera looks BACK at the glider from the front** (it faces the opposite direction of the heading) -- this fooled several earlier screenshots (left/right seemed mirrored).
+- Glider start position (Synth8/Testfield): about 73 m to the right of the runway centre line (local x=-73, y=+10), i.e. beside the runway, not on it.
+- Load distance of G/O: airport is loaded while the camera is within 24000 m and (view range - 1000 m); unloaded beyond 25000 m (Condor.exe 0x6e0d04..0x6e1535). Not a visibility cut at hundreds of metres.
+- `tools/make_airport.py <landscape_dir> <Name> <lat> <lon> <heading> [length] [width]` builds a terrain-following Grass3D photo ground (photo cropped from the landscape tiles and rotated heading-up, uncompressed BGRA DDS like the stock one), an Asphalt strip with the stock-style Muck texture, four coloured corner markers, and the .apt record (elevation = terrain height at the origin).
+- Open: the Asphalt strip looks faint/washed out (base asphalt texture not applied?), no paint objects (AsphaltPaint/GrassPaint) yet.
