@@ -107,3 +107,17 @@ Per patch a 512x512 byte array is built from two 512x512 paletted bitmaps in `Wo
 ### .apt record (tools/apt.py, byte-exact round trip of all 39 Slovenia3 records)
 72 bytes: ShortString[35] name (len byte + chars, bytes after the string are uninitialised garbage), f32 lat, f32 lon, f32 elevation, i32 direction code `(deg+1000)*100+hundredths` (106493 = 64.93 deg), i32 runway length, i32 width, u8 asphalt(1)/grass(0) +3 pad, f32 frequency MHz, u8 primary-dir-reversed, u8 tow-primary-left-side, u8 tow-secondary-left-side, u8 0.
 (Names in the game also select `Airports/<Name>G.c3d` / `<Name>O.c3d`.)
+
+## C3D mesh format (solved, tools/c3d.py round-trips all 2880 Slovenia3 files byte-exact)
+
+Little endian; ShortString = u8 len + chars.
+- `'C3D'` (3 bytes, no version), u32 ngroups + ngroups x (u32 first_obj, u32 count) (editor writes 1 group (0,nobj)), u32 nobj
+- per object: ShortString name, u32 first_vertex, u32 vertex_count, u32 first_index, u32 index_count, ShortString texture path, 4 x f32 RGBA, 3 x f32 params (O: 0.5,2.5,0; G: 0,0,0; autogen 0.01,250,0; meaning unverified)
+- u32 nverts + nverts x 32 B (pos xyz, normal xyz, uv; f32; Z up, metres), u32 nidx + nidx x u32 absolute indices (CCW)
+- Editor save may add an obfuscation offset to indices; not used in normal files.
+
+### Airports (verified in game with tools/make_test_airport.py)
+- `Airports/<Name>G.c3d` (ground: runway/asphalt) is mandatory (missing -> blue screen); `<Name>O.c3d` = objects. `.grs` is NOT required.
+- Local frame: origin = airport .apt position, runway axis = local +X, +Y = LEFT of the runway direction, Z up (right-handed).
+- A custom single-record .apt + custom G/O files load; airport is listed in the flight planner and boxes are visible in the sim.
+- Ground quad at z=0 is not visible (z-fights with terrain); lift it a few cm (make_test_airport uses 0.15 m).
