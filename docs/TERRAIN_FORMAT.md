@@ -10,9 +10,9 @@ Landscape dir: `Landscapes/<Name>/`. Slovenia3: 60 x 48 tiles, tile = 64 cells x
 | `HeightMaps/hXXYY.tr3` | 193x193 uint16 (m), no header, [x][y] (y fastest), 30 m posts, neighbours share edge posts. Name `h%03d%03d` tried first, else `h%02d%02d` (x,y). |
 | `HeightMaps/22.5m/hXXYY.tr3f` | 257x257 float32, 22.5 m posts, tried first when present. Engine-native resolution (patch array 257x257); .tr3 is bilinearly resampled. |
 | `ForestMaps/XXYY.for` | 512x512 uint8 (0 none, 1/2 tree type), name `%03d%03d` else `%02d%02d`. Loaded for 4x4 tiles around camera. |
-| `Textures/tXXYY.dds` | per-tile DXT1/DXT5 with mips, 2048/4096/8192 px; `Textures\empty.dds` fallback. |
+| `Textures/tXXYY.dds` | per-tile DXT1/DXT3 (not DXT5) with full mip chain, 2048/4096/8192 px, alpha = water; `Textures\empty.dds` fallback. |
 | `.tha .fha .oha .aha` | hash tables (see below) |
-| `.tm3` | 3840x3072 RGB, rows [y][x] (smooth image data; far-terrain colour, consumer TBD) |
+| `.tm3` | 3 bytes per 90 m cell, rows [y][x]: thermal value, roughness, slope (REQUIRED, see '.tm3' below) |
 | `.bmp` | 3840x3072 32bpp map for flight planner |
 | `.apt .cup .air .obj`, `Airports/`, `Autogen/`, `World/` | airports, waypoints, airspace, objects |
 
@@ -41,15 +41,11 @@ Custom landscape: just generate the tables with this formula (tools/terrain_hash
 
 ## Open items
 - Geo "calibration" check ("Landscape not correctly calibrated.", code at 0x6aeeb0, not a Ghidra function): compares fabs() of floats at [[0x792a68]+0x4750/+0x4754] with 80.0 and 100.0 and another with 6000.0. Meaning not yet decoded.
-- `.tm3` consumer, `LandscapeOrigin` is only an FX parameter name (shader), not a file field.
+- `LandscapeOrigin` is only an FX parameter name (shader), not a file field.
 - Landscape enumeration (`Landscapes\*.*`, "Checking landscapes", xref 0x6a8747), registry key `Software\Condor3\Landscapes\` (license key), "not registered -> demo" message at 0x830272.
 
 ## Landscape discovery (flight planner init, FUN_006a849c)
 Enumerates `Landscapes\*.*` directories (skips `.` and `..`), requires `Landscapes\<N>\<N>.ini` to exist, reads `[General] Version` as an **integer** (default 0). Version==0 (absent or non-integer such as `1.02`) -> landscape is added to the list; a valid integer value -> an error message is shown instead. So a custom landscape just needs a folder + ini copied from an existing one (`Version=1.02`). No registry key is needed to be listed (registry `Software\Condor3\Landscapes\` is only the license/registration -> otherwise "Running demo version").
-
-## .apt airport records (Slovenia3.apt, 39 records x 72 bytes, no header)
-`[0]` name length, `[1..35]` name padded with spaces (36 B), `+0x24` f32 latitude (deg N), `+0x28` f32 longitude (deg E), `+0x2c` f32 elevation m, `+0x30` u32 (unknown), `+0x34` u16 (700-1060, probably runway length m), `+0x38` u32 (25..100, probably width/other), `+0x40` f32 (~118-123, radio frequency MHz), `+0x44` 4 bytes flags. Lat/lon here are geographic degrees (Aigen 47.536, 14.141) -> the landscape is georeferenced via the .trn UTM origin (zone 33N, E 645120, N 5022720).
-Per airport: `Airports/<Name>.grs` (~21 MB), `<Name>G.c3d` (ground 3D, 'C3D' magic + ascii chunks like "Grass3D"), `<Name>O.c3d` (objects).
 
 ## Georeference (verified with all 39 airports, median error 2 m)
 `.trn` header: E0 = 645120 (UTM zone 33N easting of the **east** edge), N0 = 5022720 (northing of the **south** edge).
@@ -118,34 +114,23 @@ Little endian; ShortString = u8 len + chars.
 
 ### Airports (verified in game with tools/make_test_airport.py)
 - `Airports/<Name>G.c3d` (ground) is mandatory (missing -> blue screen); `<Name>O.c3d` = objects. `.grs` is NOT required.
-- [WRONG, see 'C3D local frame ... SOLVED'] Local frame: runway axis = local +X.  CORRECT: +Y = runway heading, +X = left.
+- Local frame: +Y = runway heading, +X = left (see 'C3D local frame of airports').
 - A custom single-record .apt + custom G/O files load; airport is listed in the flight planner and boxes are visible in the sim.
-- Ground quad at z=0 is not visible (z-fights with terrain); lift it a few cm (make_test_airport uses 0.15 m).
-
-### [SUPERSEDED - see 'Working custom airport' at the end] Airport G file: open problem (our own G mesh is NOT visible yet)
-Tried in Synth8/Testfield (glider spawns on the axis ~250 m before the airport origin): untextured strip, strip lifted to z=+2 m, double-sided,
-textured strip (copy of AigenMuck.dds under Airports/Textures/Testfield/), plus a Grass3D quad -> none visible. O objects always visible.
-Facts from Condor.exe (Delphi proc around 0x6e0c00-0x6e1600): G and O models load only while the glider is within a distance threshold of the airport;
-the G model is searched for objects by NAME (Asphalt, AsphaltPaint, AsphaltPaintYellow, Grass, GrassPaint, Gravel, Grass3D) to attach textures;
-fallback textures are `Airports\Textures\<Name>.dds` (Asphalt, AsphaltPaint, Grass, GrassPaint, Gravel, GrassDetail). Real G meshes have z in about -10..+9 m and Asphalt at ~0.
-Next: control experiment (copy a real AigenG.c3d + textures under the Testfield name) to see if a known-good G renders on Synth8; then bisect.
 
 ### Airport G/O findings (session 3)
 - **Our G meshes DO render** (white = Asphalt object with a copied Muck.dds, yellow = Grass3D quad with a copied Aigen_Grass.dds). Earlier "invisible" tests were wrong/inconclusive.
 - `Grass3D` replaces the satellite terrain texture around the airport (texture vanishes when approaching, returns with distance). Stock `<Airport>_Grass.dds` is an UNCOMPRESSED 32-bit aerial photo (Aigen: 1840x1236, no mips); Grass3D UVs are a planar projection of the ground area onto that photo (Aigen: u 0.146-0.962, v 0.013-0.982 over ~610x1110 m).
 - Stock `Asphalt` object texture is the per-airport `*Muck.dds` (DXT1 1024^2, mips); its UVs are also a planar projection over the asphalt area. Base asphalt/paint/gravel come from `Airports/Textures/{Asphalt,AsphaltPaint,Gravel,...}.dds` (landscape-relative).
 - Object names are semantic: Asphalt, AsphaltPaint, AsphaltPaintYellow, Grass, GrassPaint, Gravel, Grass3D (found by name in Condor.exe).
-- (RESOLVED below) Axis puzzle: stock Asphalt/GrassPaint meshes lie mostly along local **+Y** (principal axis ~90 deg in 25 of 32 airports, independent of the apt `direction`), but our test (strip along +X, boxes at y=+-60) looked aligned with the glider heading 065. Not yet reconciled; test with real AigenG/O under the Testfield name shows glider on photo ground heading 065.
 - `Airports/<Name>.grs` (Testfield.grs, 843 KB) was created by the game itself at runtime -> it is a generated cache (size scales with ground area), not required input.
 - Paused game: `move` changes the HUD altitude but the frame is not redrawn; unpausing is needed (P toggles; check the PAUSE text first).
 
 ### World axes for `move` / remote control (measured)
 Glider world position (double x,y,z at object+0x6d8): **+x = WEST, +y = NORTH, z up** (moving x by +224 changed the HUD longitude by -0.003 deg, y by +113.6 changed latitude by +0.001). 1 unit = 1 m. This matches the terrain georeference (x west, y north). Quick-toggle technique: `move ...`, `kkey P`, `kkey P` in one cmd.txt redraws the paused frame.
 Glider/pole collision ("collided with ground object") at the airport origin confirms the .apt lat/lon places the O objects correctly.
-Axis of local C3D frame vs runway heading is still unresolved (see above).
 
 ### C3D local frame of airports -- SOLVED (session 3, verified in game with tools/make_airport.py)
-- **+Y = along the runway heading** (clockwise from north, `.apt` direction), **+X = LEFT of the heading**, +Z up, origin = `.apt` lat/lon, Z=0 = `.apt` elevation.
+- **+Y = along the runway heading** (clockwise from north, `.apt` direction), **+X = LEFT of the heading**, +Z up, origin = `.apt` lat/lon, Z=0 = TERRAIN height at the origin (not the `.apt` elevation, see session 4).
   World (x west, y north): `world = origin + x*(cosH, sinH) + y*(-sinH, cosH)`.
 - Evidence: in all stock airports the Grass3D/GrassPaint/Asphalt UVs are an exact affine function of (x,y) (max error 0.0000); the photo is a north-up aerial image: u grows to the east, v to the south, ~0.7 m/px
   (Aigen: 1840x1236 px photo for a 1295x869 m area). Expressing east/south in local coordinates gives (-cosH, sinH) / (-sinH, -cosH), i.e. x = left, y = forward.
@@ -160,9 +145,49 @@ Axis of local C3D frame vs runway heading is still unresolved (see above).
 Result: terrain-following Grass3D ground with our own photo (runway, edge lines and threshold bars painted into the photo), corner markers in O, custom .apt -> airport selectable, glider spawns on the centre line 250 m before the origin (local x=0, y=-250).
 Lessons that cost most of the time:
 1. **Triangle winding must be CCW in local (x,y)** (stock: 3130/3130 triangles positive area). Clockwise triangles are back-face culled -> invisible ground.
-2. **The Grass3D mesh must lie ABOVE the rendered terrain surface** (we use terrain height + 0.25 m). Stock files have z in [-0.5, 0] because the editor flattens the terrain a little below the mesh. At z = -0.3 on unflattened terrain the mesh was hidden under the terrain.
+2. The Grass3D mesh must not lie BELOW the rendered terrain surface (at z = -0.3 it was hidden). Coplanar is fine and is what the stock files do (session 4); the +0.25 m used by make_airport.py is only needed because it samples the coarse 90 m .trn instead of the rendered tr3/tr3f surface.
 3. Stock **`Asphalt` is not the runway surface**: it is a dirt/rubber "muck" overlay (`<Airport>Muck.dds` is ~white, mean 252). The runway itself is part of the aerial photo on `Grass3D`. We paint our own runway into the photo (1 m/px). `GrassPaint`/`AsphaltPaint` objects add paint lines on top (not needed).
 4. Stock Asphalt (muck) pasted next to our own Grass3D rendered solid red; not investigated (probably a missing/unsupported detail texture binding).
 5. The game applies a tiled detail texture over Grass3D near the camera (the "grid of tiles" seen from the cockpit); the photo itself needs to be rendered from above (e.g. 90+ m up) to judge it.
 6. Spawn: glider starts at local (0, -250); G/O are loaded at flight start (restart needed after changing them), textures too.
 7. Testing recipe: `kkey P` (pause), `move dW dN dz` (+x west, +y north), then `kkey P` twice quickly to redraw; F2 camera looks backwards at the glider.
+
+## Session 4: airport/terrain relation solved, from-scratch demo landscape (tools/make_demo.py)
+
+### How stock airports sit on the terrain (all 39 Slovenia3 airports analysed, then verified in game)
+- **The G mesh IS the terrain surface.** For every stock airport, `z_mesh(x,y) - terrain(x,y)` is constant over all vertices of all G objects
+  (std 0.00-0.11 m), where terrain = bilinear `22.5m/*.tr3f` if the tile has one, else `.tr3`. Paint/Asphalt objects are exactly coplanar (0.00).
+  The editor "cuts" the meshes out of the height map, as the official guide says; nothing is lifted.
+- **That constant equals `apt elevation - terrain height at the airport origin`** (e.g. Kapfenberg -14.0, Novo-Mesto +8.6, Aigen 0.0): the game puts
+  local Z=0 at the terrain height under the origin and ignores the `.apt` elevation for placement. In-game proof: Talfeld with `.apt` elevation
+  530 on terrain at 500 m -> glider spawns at z=500.8, ground mesh and hangar sit on the terrain exactly as with elevation 500.
+  (`.apt` elevation is only informational: flight planner / task height.)
+- A coplanar Grass3D (z = 0 on terrain that is an exact plane) renders without z-fighting, so the game draws the airport ground with a depth
+  bias or replaces the terrain there. A mesh *below* the terrain is hidden.
+- 63 of 2880 Slovenia3 tiles have a `.tr3f`; 4 airports (Fuerstenfeld, Klagenfurt, Noetsch, Lucko) have none and are simply flat in the `.tr3`.
+  Where both exist they can differ a lot (Sostanj origin: tr3 380 m, tr3f 393.9 m) -> tr3f wins, also for the `.tha` hash (checked: tile 3642).
+- Recipe for a custom airport: make the terrain under it the surface you want (in `.tr3`, and `.tr3f` if present), then build the G mesh from
+  the same surface minus the height at the origin.
+
+### What a landscape really needs (ProofValley: nothing copied from a stock landscape)
+`tools/make_demo.py <Landscapes>/ProofValley` writes a 6x5-tile landscape (non-square, proves `idx = nTilesY*tx+ty`) that loads and flies:
+`.ini .trn .tm3 .bmp .tha .fha .oha .aha .air(empty) .obj(empty) .cup .apt`, `HeightMaps/*.tr3` (+ one `22.5m/*.tr3f`), `ForestMaps/*.for`,
+`Textures/t*.dds` + `empty.dds`, `Airports/<A>G.c3d`, `<A>O.c3d`, `Airports/Textures/<A>/`. Verified in game:
+- **Not needed:** `World/`, `Images/`, `Autogen/` (and its textures), shared `Airports/Textures/*.dds` (Asphalt, GrassDetail, ...), `.grs` (the game
+  writes `Airports/<A>.grs` itself on first flight).
+- DDS headers can be written from scratch (flags 0xA1007, pitch = top mip size, caps 0x401008; identical to stock headers). Mixed tile sizes work
+  (airport tile 4096, others 2048).
+- **Water = texture alpha**: DXT3 tiles, land alpha 255 (nibble 15), water alpha ~51 (stock water pixels use nibbles 3..14, never 0-2). Water pixels
+  render as a reflective water surface on the (flat) terrain. Tiles without water can stay DXT1.
+- Forest map classes 1/2/3 produce 3D trees where set; the ground colour under them comes only from the tile texture.
+- O file: untextured coloured objects and an object with its own DXT1 texture (`Textures/<A>/Hangar.dds`, path relative to `Airports/`) render.
+  Windsock = an object named `Windsack1` (..3) consisting of one tiny triangle at the pole top (stock: 7.9 m, colour 0.8, params 0.8/5/0); the game
+  draws the animated sock there.
+- The flight planner shows the `.bmp` and the `.apt` airport; default flight plan = `Documents/Condor3/Pilots/<pilot>/Flightplan.fpl`
+  (`Landscape=`, `TPName/TPPosX/TPPosY/TPPosZ` with X = metres west, Y = metres north; pilot from registry `LastPlayer`), NOT `Condor3/Pilots/`.
+- Spawn again at local (0, -250) on the runway.
+Screenshots: `docs/img/proofvalley_*.jpg`.
+
+### Still open
+OBJ -> C3D import conventions and the 3 material params; autogen (`Autogen/o*.c3d`) and `.obj`; G paint/gravel objects and the red stock Asphalt;
+`.grs` contents; calibration check; `.air` format; consumers of tm3 bytes 1/2; other UTM zones.

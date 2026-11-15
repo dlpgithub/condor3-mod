@@ -4,7 +4,8 @@
 usage: make_airport.py <landscape_dir> <Name> <lat> <lon> <heading_deg> [length=900] [width=50] [--append]
 
 Local frame of G/O .c3d files (derived from the stock files by an exact affine fit of the Grass3D UVs, see docs/TERRAIN_FORMAT.md):
-    +Y = along the runway heading (clockwise from north), +X = LEFT of the heading, +Z up, origin = .apt lat/lon, Z=0 = .apt elevation.
+    +Y = along the runway heading (clockwise from north), +X = LEFT of the heading, +Z up, origin = .apt lat/lon, Z=0 = terrain height at the origin
+    (the game ignores the .apt elevation for placement; see docs, session 4).
 In Condor world coordinates (x west, y north):  world = origin + x*(cosH, sinH) + y*(-sinH, cosH).
 
 Writes Airports/<Name>G.c3d (Grass3D ground with the runway painted into the photo), <Name>O.c3d (four corner markers), Airports/Textures/<Name>/
