@@ -100,3 +100,10 @@ Layout `tm3[y][x][3]`, y=0 south edge, x=0 east edge (pairs with trn[x][y]); siz
 - byte2: clamp(mean((h0-h)/dist) * 0.005, -0.5, 0.5)*254 + 127 (mean slope toward the neighbourhood; ~127 = flat)
 - disk = offsets (i,j), i^2+j^2<=64, sampled at (x+2i, y+2j) (cells outside the map skipped); dist = sqrt(i^2+j^2).
 The game requires the file (missing -> shutdown right after "Initializing Thermals").
+
+### .for values (LandscapeEditor 'Export forest maps', @0x5ed4c0)
+Per patch a 512x512 byte array is built from two 512x512 paletted bitmaps in `Working/ForestMaps/`: `s<CCRR>.bmp` (coniferous) -> value 1, `b<CCRR>.bmp` (deciduous) -> += 2, so values are 0 none, 1 conifer, 2 deciduous, 3 both. Array `[i][j]` = bitmap pixel (x = 511-i, y = 511-j): i (slow) runs from the EAST edge towards west, j (fast) from the SOUTH edge towards north (matches the correlation result). Written raw (262144 bytes) to `ForestMaps/XXYY.for`.
+
+### .apt record (tools/apt.py, byte-exact round trip of all 39 Slovenia3 records)
+72 bytes: ShortString[35] name (len byte + chars, bytes after the string are uninitialised garbage), f32 lat, f32 lon, f32 elevation, i32 direction code `(deg+1000)*100+hundredths` (106493 = 64.93 deg), i32 runway length, i32 width, u8 asphalt(1)/grass(0) +3 pad, f32 frequency MHz, u8 primary-dir-reversed, u8 tow-primary-left-side, u8 tow-secondary-left-side, u8 0.
+(Names in the game also select `Airports/<Name>G.c3d` / `<Name>O.c3d`.)
