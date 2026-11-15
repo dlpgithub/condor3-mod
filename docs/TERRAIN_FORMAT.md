@@ -129,3 +129,12 @@ Facts from Condor.exe (Delphi proc around 0x6e0c00-0x6e1600): G and O models loa
 the G model is searched for objects by NAME (Asphalt, AsphaltPaint, AsphaltPaintYellow, Grass, GrassPaint, Gravel, Grass3D) to attach textures;
 fallback textures are `Airports\Textures\<Name>.dds` (Asphalt, AsphaltPaint, Grass, GrassPaint, Gravel, GrassDetail). Real G meshes have z in about -10..+9 m and Asphalt at ~0.
 Next: control experiment (copy a real AigenG.c3d + textures under the Testfield name) to see if a known-good G renders on Synth8; then bisect.
+
+### Airport G/O findings (session 3)
+- **Our G meshes DO render** (white = Asphalt object with a copied Muck.dds, yellow = Grass3D quad with a copied Aigen_Grass.dds). Earlier "invisible" tests were wrong/inconclusive.
+- `Grass3D` replaces the satellite terrain texture around the airport (texture vanishes when approaching, returns with distance). Stock `<Airport>_Grass.dds` is an UNCOMPRESSED 32-bit aerial photo (Aigen: 1840x1236, no mips); Grass3D UVs are a planar projection of the ground area onto that photo (Aigen: u 0.146-0.962, v 0.013-0.982 over ~610x1110 m).
+- Stock `Asphalt` object texture is the per-airport `*Muck.dds` (DXT1 1024^2, mips); its UVs are also a planar projection over the asphalt area. Base asphalt/paint/gravel come from `Airports/Textures/{Asphalt,AsphaltPaint,Gravel,...}.dds` (landscape-relative).
+- Object names are semantic: Asphalt, AsphaltPaint, AsphaltPaintYellow, Grass, GrassPaint, Gravel, Grass3D (found by name in Condor.exe).
+- Axis puzzle: stock Asphalt/GrassPaint meshes lie mostly along local **+Y** (principal axis ~90 deg in 25 of 32 airports, independent of the apt `direction`), but our test (strip along +X, boxes at y=+-60) looked aligned with the glider heading 065. Not yet reconciled; test with real AigenG/O under the Testfield name shows glider on photo ground heading 065.
+- `Airports/<Name>.grs` (Testfield.grs, 843 KB) was created by the game itself at runtime -> it is a generated cache (size scales with ground area), not required input.
+- Paused game: `move` changes the HUD altitude but the frame is not redrawn; unpausing is needed (P toggles; check the PAUSE text first).
