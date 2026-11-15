@@ -70,3 +70,9 @@ Evidence: correlation of real Slovenia3 textures with heights (5 tiles) and with
 World coordinates seen by the game: x west, y north, z up (glider position doubles at obj+0x6d8/0x6e0/0x6e8, e.g. `move 0 0 0` in the mod prints them); lat/lon computed from (E0-x, N0+y) matches the in-game HUD to 4 decimals.
 Airport files are position independent: G.c3d/O.c3d/.grs of Aigen work when the airport is moved elsewhere (only lat/lon/elevation in the .apt record change); elevation must match the terrain.
 Synthetic landscape: `tools/make_landscape.py` (own height function, own textures/forest, new airport position) loads and plays in the game (Synth8).
+
+## Verified optionality / robustness (in-game tests on Synth8)
+- `<name>.tm3` is REQUIRED: without it the game logs `Cannot open file ...tm3. File not found.` right after "Initializing Thermals." and shuts down. It is the per-landscape thermal map (786432 bytes = 512x512x3 for an 8x8-tile landscape: 3 bytes per 90 m cell, [y][x]); a synthetic one (green->tan by height) is accepted.
+- Wrong values in `.tha`/`.fha` (+5000 on every hash) load without any log message or visible effect in the test flight (hash only gates the cached-validity flags; see above).
+- Texture orientation confirmed in game (world-quadrant tint test, heading 065: NE ahead-left, SE ahead-right): north-up, column 0 = west, row 0 = north.
+- Tool pitfall: `make_landscape.py OUT NAME` takes the landscape directory itself (`.../Landscapes/Synth8`), not the Landscapes folder.
