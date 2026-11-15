@@ -117,12 +117,12 @@ Little endian; ShortString = u8 len + chars.
 - Editor save may add an obfuscation offset to indices; not used in normal files.
 
 ### Airports (verified in game with tools/make_test_airport.py)
-- `Airports/<Name>G.c3d` (ground: runway/asphalt) is mandatory (missing -> blue screen); `<Name>O.c3d` = objects. `.grs` is NOT required.
-- Local frame: origin = airport .apt position, runway axis = local +X, +Y = LEFT of the runway direction, Z up (right-handed).
+- `Airports/<Name>G.c3d` (ground) is mandatory (missing -> blue screen); `<Name>O.c3d` = objects. `.grs` is NOT required.
+- [WRONG, see 'C3D local frame ... SOLVED'] Local frame: runway axis = local +X.  CORRECT: +Y = runway heading, +X = left.
 - A custom single-record .apt + custom G/O files load; airport is listed in the flight planner and boxes are visible in the sim.
 - Ground quad at z=0 is not visible (z-fights with terrain); lift it a few cm (make_test_airport uses 0.15 m).
 
-### Airport G file: open problem (our own G mesh is NOT visible yet)
+### [SUPERSEDED - see 'Working custom airport' at the end] Airport G file: open problem (our own G mesh is NOT visible yet)
 Tried in Synth8/Testfield (glider spawns on the axis ~250 m before the airport origin): untextured strip, strip lifted to z=+2 m, double-sided,
 textured strip (copy of AigenMuck.dds under Airports/Textures/Testfield/), plus a Grass3D quad -> none visible. O objects always visible.
 Facts from Condor.exe (Delphi proc around 0x6e0c00-0x6e1600): G and O models load only while the glider is within a distance threshold of the airport;
