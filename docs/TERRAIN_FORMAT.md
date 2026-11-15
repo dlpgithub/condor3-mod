@@ -61,3 +61,12 @@ Heights/tiles grid: `x = (E0 - E)/90` (x counts WEST from the east edge), `y = (
 `crop_landscape.py Slovenia3 Crop8 32 38 8 8` builds an 8x8-tile landscape: new .trn with shifted E0/N0, renamed tr3/tr3f/for/dds tiles (new tile index), regenerated .tha/.fha (idx = nTilesY*tx+ty with the NEW nTilesY) and .oha (md5), cropped .tm3/.bmp, airports inside the crop. Result in game (CrossOver): appears in the flight planner list as `Crop8 [1.02]`, map and airports at correct lat/lon, flight starts at Aigen, terrain/textures/autogen/grass correct.
 Notes learned: `Airports/Textures` and `Autogen/Textures` are referenced BY NAME from the .c3d files and must be copied whole (without them airfield ground renders white). Files outside tile range are not needed.
 .oha = MD5 hex of `Autogen/oXXYY.c3d`, key tx*1000+ty (empty entry if no autogen file). Neither .oha nor .aha strings occur in Condor.exe (probably only the validator tools).
+
+## Orientation of tile textures and forest maps (verified)
+All per-tile rasters use the same convention: with tile origin (x0,y0) = (tx*5760, ty*5760) (the tile's SOUTH-EAST corner, x grows WEST, y grows NORTH):
+- `.tr3`/`.tr3f`/`.for` arrays: `a[i][j]`, i (slow) -> x = x0 + i*step, j (fast) -> y = y0 + j*step.
+- `tXXYY.dds` is an ordinary north-up map image: column c -> x = x0 + T*(1-(c+.5)/S) (column 0 = WEST edge), row r -> y = y0 + T*(1-(r+.5)/S) (row 0 = NORTH edge).
+Evidence: correlation of real Slovenia3 textures with heights (5 tiles) and with forest maps (5 tiles, r = -0.7..-0.86, all the same transform), plus an in-game test: a synthetic texture coloured by world quadrant around the airport shows green NE / blue SE exactly where expected from the cockpit (heading 065).
+World coordinates seen by the game: x west, y north, z up (glider position doubles at obj+0x6d8/0x6e0/0x6e8, e.g. `move 0 0 0` in the mod prints them); lat/lon computed from (E0-x, N0+y) matches the in-game HUD to 4 decimals.
+Airport files are position independent: G.c3d/O.c3d/.grs of Aigen work when the airport is moved elsewhere (only lat/lon/elevation in the .apt record change); elevation must match the terrain.
+Synthetic landscape: `tools/make_landscape.py` (own height function, own textures/forest, new airport position) loads and plays in the game (Synth8).
