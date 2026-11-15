@@ -155,3 +155,14 @@ Axis of local C3D frame vs runway heading is still unresolved (see above).
 - Load distance of G/O: airport is loaded while the camera is within 24000 m and (view range - 1000 m); unloaded beyond 25000 m (Condor.exe 0x6e0d04..0x6e1535). Not a visibility cut at hundreds of metres.
 - `tools/make_airport.py <landscape_dir> <Name> <lat> <lon> <heading> [length] [width]` builds a terrain-following Grass3D photo ground (photo cropped from the landscape tiles and rotated heading-up, uncompressed BGRA DDS like the stock one), an Asphalt strip with the stock-style Muck texture, four coloured corner markers, and the .apt record (elevation = terrain height at the origin).
 - Open: the Asphalt strip looks faint/washed out (base asphalt texture not applied?), no paint objects (AsphaltPaint/GrassPaint) yet.
+
+### Working custom airport (verified in game, tools/make_airport.py, commit after a626140)
+Result: terrain-following Grass3D ground with our own photo (runway, edge lines and threshold bars painted into the photo), corner markers in O, custom .apt -> airport selectable, glider spawns on the centre line 250 m before the origin (local x=0, y=-250).
+Lessons that cost most of the time:
+1. **Triangle winding must be CCW in local (x,y)** (stock: 3130/3130 triangles positive area). Clockwise triangles are back-face culled -> invisible ground.
+2. **The Grass3D mesh must lie ABOVE the rendered terrain surface** (we use terrain height + 0.25 m). Stock files have z in [-0.5, 0] because the editor flattens the terrain a little below the mesh. At z = -0.3 on unflattened terrain the mesh was hidden under the terrain.
+3. Stock **`Asphalt` is not the runway surface**: it is a dirt/rubber "muck" overlay (`<Airport>Muck.dds` is ~white, mean 252). The runway itself is part of the aerial photo on `Grass3D`. We paint our own runway into the photo (1 m/px). `GrassPaint`/`AsphaltPaint` objects add paint lines on top (not needed).
+4. Stock Asphalt (muck) pasted next to our own Grass3D rendered solid red; not investigated (probably a missing/unsupported detail texture binding).
+5. The game applies a tiled detail texture over Grass3D near the camera (the "grid of tiles" seen from the cockpit); the photo itself needs to be rendered from above (e.g. 90+ m up) to judge it.
+6. Spawn: glider starts at local (0, -250); G/O are loaded at flight start (restart needed after changing them), textures too.
+7. Testing recipe: `kkey P` (pause), `move dW dN dz` (+x west, +y north), then `kkey P` twice quickly to redraw; F2 camera looks backwards at the glider.

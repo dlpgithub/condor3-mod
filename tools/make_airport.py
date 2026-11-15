@@ -7,7 +7,7 @@ Local frame of G/O .c3d files (derived from the stock files by an exact affine f
     +Y = along the runway heading (clockwise from north), +X = LEFT of the heading, +Z up, origin = .apt lat/lon, Z=0 = .apt elevation.
 In Condor world coordinates (x west, y north):  world = origin + x*(cosH, sinH) + y*(-sinH, cosH).
 
-Writes Airports/<Name>G.c3d (Grass3D ground photo, Asphalt strip), <Name>O.c3d (four corner markers), Airports/Textures/<Name>/
+Writes Airports/<Name>G.c3d (Grass3D ground with the runway painted into the photo), <Name>O.c3d (four corner markers), Airports/Textures/<Name>/
 (<Name>_Grass.dds uncompressed aerial photo cropped from the landscape tiles, <Name>_Muck.dds copied from a stock airport if available)
 and writes <landscape>/<landscape>.apt with this single airport (--append keeps existing records)."""
 import sys, os, math, struct, glob, shutil
@@ -66,7 +66,7 @@ def write_bgra_dds(path, rgb):
     hdr = b'DDS ' + struct.pack('<31I', 124, 0xA1007, h, w, w*h*4, 0, 1, *([0]*11), 32, 65, 0, 32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000, 0x401008, 0, 0, 0, 0)
     open(path, 'wb').write(hdr + bgra.tobytes())
 
-def photo(ld, W0, N0, hd, xmin, xmax, ymin, ymax, res=1.0):
+def photo(ld, W0, N0, hd, xmin, xmax, ymin, ymax, res=1.0, runway=None):
     """aerial photo of the local rectangle, heading-up (image right = -x, image down = -y), from the landscape's tile textures"""
     nu, nv = int((xmax-xmin)/res), int((ymax-ymin)/res)
     u = (np.arange(nu)+0.5)/nu; v = (np.arange(nv)+0.5)/nv
@@ -85,7 +85,26 @@ def photo(ld, W0, N0, hd, xmin, xmax, ymin, ymax, res=1.0):
         col = np.clip(((1-(W[m]-key[0]*TILE)/TILE)*S).astype(int), 0, S-1)      # col 0 = west edge (x max)
         row = np.clip(((1-(N[m]-key[1]*TILE)/TILE)*S).astype(int), 0, S-1)      # row 0 = north edge (y max)
         img[m] = T[row, col]
+    if runway: paint_runway(img, x, y, *runway)
     return img
+
+def paint_runway(img, x, y, length, width, asphalt=True):
+    """draw an asphalt (or grass) runway with markings straight into the photo; x,y = local coordinates of every pixel"""
+    L, Wd = length/2, width/2
+    on = (np.abs(x) <= Wd) & (np.abs(y) <= L)
+    if asphalt:
+        rng = np.random.default_rng(1); noise = rng.normal(0, 3, img.shape[:2])[..., None]
+        img[on] = np.clip(np.array([92, 92, 96]) + noise[on], 0, 255).astype(np.uint8)
+    white = np.array([235, 235, 230], np.uint8)
+    edge = on & (np.abs(x) >= Wd-1.2)                                                       # edge lines
+    centre = on & (np.abs(x) <= 0.45) & (np.abs(y) <= L-25) & (((y+L) % 36) < 22)           # dashed centre line
+    bars = np.zeros_like(on)
+    for k in range(-4, 5):                                                                   # threshold stripes at both ends
+        if k == 0: continue
+        bars |= on & (np.abs(x - k*Wd/5.0) <= 1.0) & (np.abs(y) >= L-30) & (np.abs(y) <= L-10)
+    img[edge | centre | bars] = white
+
+
 
 def grid_mesh(x0, x1, y0, y1, step, zfun, uvfun, zoff=0.0):
     nx = max(2, int(math.ceil((x1-x0)/step))+1); ny = max(2, int(math.ceil((y1-y0)/step))+1)
@@ -99,7 +118,7 @@ def grid_mesh(x0, x1, y0, y1, step, zfun, uvfun, zoff=0.0):
     for i in range(nx-1):
         for j in range(ny-1):
             a = i*ny+j; b = (i+1)*ny+j; c = (i+1)*ny+j+1; d = i*ny+j+1
-            idx += [a, c, b, a, d, c]          # winding chosen so the normal is +Z for the stock frame (x left, y forward): checked in main()
+            idx += [a, b, c, a, c, d]          # CCW in (x,y) like all stock triangles (clockwise ones are culled -> invisible ground)
     return V, np.array(idx, np.uint32)
 
 def box(cx, cy, z0, w, d, h):
@@ -124,15 +143,12 @@ def main(ld, name, lat, lon, hd, length=900, width=50, append=False):
     zl = lambda x, y: zg(x, y) - elev
     ax0, ax1, ay0, ay1 = -width/2-300, width/2+300, -length/2-150, length/2+150
     os.makedirs(f'{ld}/Airports/Textures/{name}', exist_ok=True)
-    write_bgra_dds(f'{ld}/Airports/Textures/{name}/{name}_Grass.dds', photo(ld, W0, N0, hd, ax0, ax1, ay0, ay1))
+    write_bgra_dds(f'{ld}/Airports/Textures/{name}/{name}_Grass.dds', photo(ld, W0, N0, hd, ax0, ax1, ay0, ay1, runway=(length, width)))
     stock = os.path.expanduser('~/mnt/Condor3/Landscapes/Slovenia3/Airports/Textures/Aigen/AigenMuck.dds')
     if os.path.exists(stock): shutil.copy(stock, f'{ld}/Airports/Textures/{name}/{name}_Muck.dds')
     uv_g = lambda x, y: ((ax1-x)/(ax1-ax0), (ay1-y)/(ay1-ay0))
-    vg, ig = grid_mesh(ax0, ax1, ay0, ay1, 30.0, zl, uv_g, zoff=-0.3)
-    uv_a = lambda x, y: ((y+length/2)/length, (width/2-x)/width)
-    va, ia = grid_mesh(-width/2, width/2, -length/2, length/2, 25.0, zl, uv_a, zoff=0.05)
-    g = c3d.build([dict(name='Grass3D', texture=f'Textures\\{name}\\{name}_Grass.dds', color=(1, 1, 1, 1), params=(0, 0, 0), vertices=vg, indices=ig),
-                   dict(name='Asphalt', texture=f'Textures\\{name}\\{name}_Muck.dds', color=(1, 1, 1, 1), params=(0, 0, 0), vertices=va, indices=ia)])
+    vg, ig = grid_mesh(ax0, ax1, ay0, ay1, 30.0, zl, uv_g, zoff=0.25)   # mesh must lie ABOVE the terrain surface (stock airports flatten the terrain slightly below the mesh)
+    g = c3d.build([dict(name='Grass3D', texture=f'Textures\\{name}\\{name}_Grass.dds', color=(1, 1, 1, 1), params=(0, 0, 0), vertices=vg, indices=ig)])
     open(f'{ld}/Airports/{name}G.c3d', 'wb').write(c3d.write(g))
     objs = []
     for nm, cx, cy, col in (('FrontLeftRed', width/2+12, length/2, (1, 0, 0, 1)), ('FrontRightGreen', -width/2-12, length/2, (0, 0.8, 0, 1)),
@@ -144,7 +160,7 @@ def main(ld, name, lat, lon, hd, length=900, width=50, append=False):
     p = f'{ld}/{os.path.basename(ld)}.apt'
     old = open(p, 'rb').read() if append and os.path.exists(p) else b''
     open(p, 'wb').write(old + rec)
-    print('wrote', name, 'G/O, textures and', os.path.basename(p), f'({len(vg)} ground verts, {len(va)} asphalt verts)')
+    print('wrote', name, 'G/O, textures and', os.path.basename(p), f'({len(vg)} ground verts)')
 
 if __name__ == '__main__':
     a = [x for x in sys.argv[1:] if not x.startswith('--')]
