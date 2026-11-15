@@ -50,3 +50,14 @@ Enumerates `Landscapes\*.*` directories (skips `.` and `..`), requires `Landscap
 ## .apt airport records (Slovenia3.apt, 39 records x 72 bytes, no header)
 `[0]` name length, `[1..35]` name padded with spaces (36 B), `+0x24` f32 latitude (deg N), `+0x28` f32 longitude (deg E), `+0x2c` f32 elevation m, `+0x30` u32 (unknown), `+0x34` u16 (700-1060, probably runway length m), `+0x38` u32 (25..100, probably width/other), `+0x40` f32 (~118-123, radio frequency MHz), `+0x44` 4 bytes flags. Lat/lon here are geographic degrees (Aigen 47.536, 14.141) -> the landscape is georeferenced via the .trn UTM origin (zone 33N, E 645120, N 5022720).
 Per airport: `Airports/<Name>.grs` (~21 MB), `<Name>G.c3d` (ground 3D, 'C3D' magic + ascii chunks like "Grass3D"), `<Name>O.c3d` (objects).
+
+## Georeference (verified with all 39 airports, median error 2 m)
+`.trn` header: E0 = 645120 (UTM zone 33N easting of the **east** edge), N0 = 5022720 (northing of the **south** edge).
+Heights/tiles grid: `x = (E0 - E)/90` (x counts WEST from the east edge), `y = (N - N0)/90` (y counts NORTH from the south edge). Tile (tx,ty) = (x//64, y//64).
+.tm3 is [y][x] RGB rows (same indexing as the height grid, no flips). .bmp is a normal north-up, west-left 32bpp image (bottom-up BMP, row 0 = south), 90 m per pixel.
+`tools/utm.py` has forward/inverse UTM.
+
+## End-to-end proof: cropped landscape (tools/crop_landscape.py)
+`crop_landscape.py Slovenia3 Crop8 32 38 8 8` builds an 8x8-tile landscape: new .trn with shifted E0/N0, renamed tr3/tr3f/for/dds tiles (new tile index), regenerated .tha/.fha (idx = nTilesY*tx+ty with the NEW nTilesY) and .oha (md5), cropped .tm3/.bmp, airports inside the crop. Result in game (CrossOver): appears in the flight planner list as `Crop8 [1.02]`, map and airports at correct lat/lon, flight starts at Aigen, terrain/textures/autogen/grass correct.
+Notes learned: `Airports/Textures` and `Autogen/Textures` are referenced BY NAME from the .c3d files and must be copied whole (without them airfield ground renders white). Files outside tile range are not needed.
+.oha = MD5 hex of `Autogen/oXXYY.c3d`, key tx*1000+ty (empty entry if no autogen file). Neither .oha nor .aha strings occur in Condor.exe (probably only the validator tools).
