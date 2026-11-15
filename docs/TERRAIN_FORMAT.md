@@ -188,6 +188,111 @@ Lessons that cost most of the time:
 - Spawn again at local (0, -250) on the runway.
 Screenshots: `docs/img/proofvalley_*.jpg`.
 
+
+## Session 5: objects, airport ground layers, scenery, airspace, thermals (everything below verified in game on ProofValley unless marked RE)
+
+Method notes: (1) the game ships its shader SOURCES in `Condor3/Effects/fx/*.fx` (EffectDX11File = objects/airport surfaces, EffectLand = terrain,
+EffectGrass = 3D grass, EffectAutoObjects = trees) - they name every material/constant. (2) Delphi forms can be dumped from the exe resources
+(RCDATA `TPF0`), which gives menu captions and event handler names; handler addresses are in the class method tables (u16 size, u32 address,
+ShortString name). (3) `rea` pseudo-code times out on these binaries; a small annotated objdump wrapper (resolves Delphi string literals and
+float constants) was enough. The official PDFs were read completely; their claims are folded in below.
+
+### C3D, final picture
+- Header groups = **LOD levels** (planes have 2-3 groups, e.g. `(0,104),(104,28),(132,1)`; landscape files always one group).
+- Material record after the texture name: `R, G, B, A` then **`Spec, Shiny, Env`** (column titles of ObjectEditor's grid; shader constants
+  `SpecularStrength`, `SpecularShininess`, `EnvironmentalStrength`). Defaults: O files 0.5 / 2.5 / 0, G files 0 / 0 / 0.
+- **For landscape content the three numbers do nothing**: airport O objects, world objects and autogen are drawn with technique
+  `Render_GroundObject` = `LightColor*N.L + Ambient` x MaterialColor x Texture, no specular, no environment map (test spheres with Spec 0 / Spec 1
+  Shiny 50 / Env 1 look identical). They matter only for aircraft.
+- Material colour multiplies the texture (white = unchanged). Material alpha < 1 blends (works without the stock `z...` naming and regardless of
+  order in the file in a simple test; stock files still name transparent objects `z...` and sort them last = ObjectEditor "Sort objects by render order").
+  Texture alpha is alpha-TESTED (`clip(a - AlphaRef)`): DXT3 textures with holes give cut-outs (fences, chain link).
+- Texture paths are relative to the folder of the c3d (`Airports/`, `World/Objects/`, `Autogen/`); `/` and `\` both work; DXT1 with mips,
+  DXT3, and uncompressed BGRA all load.
+- Coordinate convention everywhere (airport local, world object, autogen): x and y as stored, z up, **triangles counter-clockwise when plotted
+  with x to the right and y up, seen from the side the normal points to** (naive cross product agrees with the stored normals in 99.97 % of stock triangles).
+
+### OBJ -> C3D (ObjectEditor importer, RE of ObjectEditor.exe 0x51eabc; reimplemented in tools/obj2c3d.py and verified with a tower object)
+- "Open OBJ (Blender)" (Blender export Forward = Y, Up = Z, triangulated): `C3D (x, y, z) = OBJ (y, x, z)`; normals the same; `uv = (u, 1 - v)`.
+  So Blender +X = C3D +Y (runway heading / north) and Blender +Y = C3D +X (left / west). That is why the official guide says "runway along X".
+- "Open OBJ (Wings)" (Y up): `C3D (x, y, z) = OBJ (z, -x, y)`.
+- Both mappings are reflections, so the triangle order is reversed to keep outward faces.
+- Lines understood: `mtllib, o, # object, usemtl, v, vt, vn, f`; MTL: `newmtl, Kd` (colour), `d` (alpha), `Ks` (Spec), `Ns` (Shiny x 100), `Ke` (Env),
+  `map_Kd` (texture). One material per object. Other ObjectEditor formats: X/CX, GAU (gauges), C3Dx (index-obfuscated C3D).
+
+### Airport G file: the surface layers (shader `Render_AirportSurface`, loader Condor.exe 0x6e0d43..)
+- Objects are found by name: `Asphalt, AsphaltPaint, AsphaltPaintYellow, Grass, GrassPaint, Gravel, Grass3D`. Everything is drawn coplanar on
+  the terrain; surfaces must not overlap each other (cut holes), paint lies on top of its base surface.
+- Colour = Light x **MaterialColor x object texture x (0.5 + detail) x (0.5 + big detail)**. The object texture is the per-airport "sub-texture"
+  (aerial photo) or a "muck" texture; the detail textures are the tiling asphalt / paint / grass / gravel textures.
+- Detail textures: the game's own `Condor3/World/Textures/{Asphalt,AsphaltPaint,AsphaltPaintYellow,Grass,GrassPaint,GrassDetail,Gravel}.dds`
+  (so a landscape needs none), overridden per airport by `Landscapes/<L>/Airports/Textures/<AirportName>/{Asphalt,AsphaltPaint,Grass,GrassDetail,GrassPaint,Gravel}.dds`
+  (folder name = airport name) when present.
+- **Detail tiling comes from the UVs**: for every surface object the game fits `u` against one horizontal axis and `v` against the other over all
+  vertices (least squares, 0x6e18d8) and tiles the detail every 2 m / 20 m using those slopes. For Asphalt/AsphaltPaint/AsphaltPaintYellow the
+  axes are rotated by 90 deg: **u must vary along the runway (local y) and v across it** (stock muck textures: grad u = +y, grad v = -x).
+  If u depends only on x and v only on y (slopes 0) the detail texture is lost and the surface is a flat untextured colour.
+  Grass-type objects use the north-up sub-texture mapping (u east, v south), like stock.
+- Official colour conventions (guide): Asphalt 0.5-0.8 grey (white looks bleached), AsphaltPaint 0.8-1, AsphaltPaintYellow (0.6, 0.6, 0), GrassPaint 0.8.
+- **Grass3D** = ground mesh + sub-texture; additionally 3D grass blades (EffectGrass) are instanced on a 0.4 m grid over it. Blade colour comes
+  from the sub-texture, blade size from the sub-texture's **alpha** (255 long, stock uses ~64-95 for mown strips; **alpha 0 = no blades**, e.g. on
+  asphalt painted into the photo). Use an uncompressed 32-bit BGRA dds (stock) so the alpha is exact.
+- `Airports/<A>.grs` = cache of the grass grid written by the game when missing: blocks of `u32 count + count x (u16 ix, u16 iy, f32 altitude)`,
+  cells of 0.4 m on a north-up grid over the airport bounding box, bucketed 30 x 30 cells; 40 MB for a 600 x 1400 m airport. Delete it after
+  changing the G file or the sub-texture.
+- **Spawn point** = on the centre line, 200 m behind the START of the runway as given by the `.apt` length (local y = -length/2 + 200):
+  Talfeld 900 m -> y = -250, Hangfeld 600 m -> y = -100.
+- A sloped airport works: Hangfeld lies on a plane tilted 2 % along and 1 % across the runway, written as float heights in a `.tr3f`;
+  G surfaces and O objects built on the same plane (z relative to the origin) sit exactly on the terrain, the glider stands on it.
+
+### Airport O file
+- All objects are solid (collision). Windsock: object named `Windsack1`..`Windsack3` = one equilateral triangle; centre = attachment point,
+  **sock length = 100 x circumradius** (0.045 -> 4.5 m like stock, 0.10 -> 10 m: confirmed). The pole is ordinary geometry.
+
+### World objects: `<L>.obj` + `World/Objects/` (loader Condor.exe 0x6de460)
+- `<L>.obj` is a list of 152-byte records (file may be empty): `f32 x (west), f32 y (north), f32 z, f32 scale, f32 rotation, ShortString[131] name`.
+  z is ignored (the game samples the terrain), scale is uniform, rotation is in radians and is the **heading of the model's +Y axis** (0 = north,
+  pi/2 = east); at rotation 0 model +X points west. The name may carry `.c3d` or not.
+- The model is looked up in `Landscapes/<L>/World/Objects/` first, then in the game's `World/Objects/` (e.g. `Winch`, `Pylon` exist there).
+  Textures relative to that folder (`Textures/...`).
+
+### Autogen: `Autogen/oXXYY.c3d` (+ `Autogen/Textures/`)
+- One ordinary C3D per tile (name like the height tile). Vertex coordinates: **x west / y north relative to the tile CENTRE, z = absolute altitude**
+  (checked against the terrain for three stock tiles, and with our own houses). Stock content: OSM buildings, pylons; params mostly 0/0/0.
+- `<L>.oha` (MD5 per tile) is not read by the game (only the editor/validator); a tile without autogen simply has no file.
+
+### Terrain details
+- `.trn` header (36 bytes): `u32 width, u32 height, f32 90 (cell), f32 dx = -90, f32 dy = +90, f32 E0, f32 N0, u32 UTM zone, u32 'N'`.
+  The "Landscape not correctly calibrated" check (0x6aee47) only requires `80 <= |dx| <= 100` and `80 <= |dy| <= 100`.
+- **The UTM zone of the header is honoured**: the same landscape written as zone 31 (airport and airspace lat/lon recomputed) shows airports and
+  airspace at the right map position and flies normally. Southern hemisphere not tested.
+- Water: a terrain texel is water when the tile texture's **alpha < 0.8** (EffectLand); use DXT3 (DXT1's 1-bit alpha gives jagged shores, guide).
+- Tile textures get a tiled detail texture multiplied in (x30 per tile); `RealtimeShading=0` in the ini lights the terrain as if flat.
+- Files that define a landscape for the game's file list (0x6956bd): `.air .trn .bmp .tm3 .obj .apt .tha .fha .aha .ini`; the `.bmp` must have
+  exactly the `.trn` dimensions ("Map bitmap dimensions differ from TRN header dimensions!").
+
+### Airspace: `<L>.air` + `<L>.aha`
+- `.air` is OpenAir text. Parser (0x666b3c) understands `AC, AN, AY, AL, AH` (GND / SFC / FL / FT / M, MSL / AGL), `V X=`, `V D=+/-`, `DP`, `DC` (NM), `DA`, `DB`.
+- **`.aha` is mandatory and checked**: decimal hash of the `.air` bytes (same hash as tha/fha, idx 0). Mismatch or missing file raises
+  "<L>: modified airspace file detected or airspace hash file (.aha) missing!". Empty `.air` -> `0`.
+- Verified: a `DC 2` circle around Talfeld is drawn in the flight planner, listed on the PDA, and "entered airspace" is announced.
+
+### Thermal map `.tm3` (RE of the thermal generator 0x75ad94 and updater 0x75a3f9)
+- Number of thermals ~ landscape area x length of the day. For every candidate position the 3 bytes of the cell are read:
+  - byte1 (terrain roughness) decides the mode: **> 0.5 (stddev > 50 m) = mountain mode**, where the sun direction against the terrain slope
+    drives the thermal; **otherwise flat-land mode**, where probability and strength are proportional to **byte0 (the painted thermal map)**
+    together with the weather's flats activity (guide: black = no thermals; water 0, deciduous 64, forest/grass 102, fields 178).
+  - during a thermal's life byte1 is sampled again (bilinear): above 0.5 the strength is scaled by `1 - 3 (v - 0.5)`.
+  - byte2 (mean slope): consumer not found.
+
+### Flight plan and test automation
+- `scripts/flytest.sh [views]` starts the game, enters the flight, pauses and visits camera positions given as ABSOLUTE world coordinates
+  (`tools/views.py name:airport:x:y[:height] ...` writes them from airport-local coordinates); the glider drifts whenever the sim runs, so the
+  script reads the position back before every move. Ground-level cameras stay level; after several airborne moves the glider pitches up.
+
 ### Still open
-OBJ -> C3D import conventions and the 3 material params; autogen (`Autogen/o*.c3d`) and `.obj`; G paint/gravel objects and the red stock Asphalt;
-`.grs` contents; calibration check; `.air` format; consumers of tm3 bytes 1/2; other UTM zones.
+- Southern hemisphere / very different latitudes; landscapes larger than the tested 6x5 with other tile counts are covered by stock (60x48).
+- What exactly `.tha`/`.fha` mismatches trigger (official text: treated as cheating); consumer of tm3 byte2; the red stock Asphalt seen in session 3
+  (a degenerate-UV Asphalt renders flat grey, not red).
+- Rotation angle used for the detail fit of grass-type surfaces (field +0x5c of the airport object); north-up sub-texture mapping works.
+- C3Dx obfuscation, GAU, plane-specific C3D features (animation morph targets), `Images/` (optional splash picture, not needed).
