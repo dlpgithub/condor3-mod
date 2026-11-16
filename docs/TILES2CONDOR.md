@@ -5,28 +5,63 @@
 First result: `Landscapes/Orly` from `/Users/lennard/Downloads/earth-3dtiles-66e4c38d` (Paris Orly, 11.3 x 6.1 km, 1680 tiles), verified in game.
 
 ```
-python3 tools/tiles2condor.py <export_dir> <config.json> <Condor3>/Landscapes/<Name> [--work DIR] [--budget SECONDS] [--only STAGE]
+python3 tools/tiles2condor.py <export_dir> [<export_dir> ...] <config.json> <Condor3>/Landscapes/<Name> [--work DIR] [--budget SECONDS] [--only STAGE]
 ```
-Needs python3 with numpy and Pillow (`pip3 install numpy pillow`; the Mac's system python has neither). Every stage is resumable: it skips
-what already exists in the work folder (default `<export_dir>/_condor_work`) or in the output. `--budget N` stops cleanly after N seconds
-(exit code 2) so it can be run in slices; rerun the same command to continue. To redo a stage delete its outputs (see table).
+Needs python3 with numpy and Pillow (`pip3 install numpy pillow`; the Mac's system python has neither).
+
+- **Several exports** can be given (earth-rea caps one export at 5000 tiles). They are merged; a tile present twice is used once.
+- **Any mix of detail levels** is fine: at every place the finest tile wins (see "Detail levels").
+- Every stage is resumable: it skips what already exists in the work folder (default `<first export_dir>/_condor_work`) or in the output.
+  `--budget N` stops cleanly after N seconds (exit code 2); run the same command again to continue. `--only STAGE` runs one stage.
+- **Outputs that exist are kept.** To rebuild after changing something, build into a new landscape name or remove the old landscape folder,
+  and use a fresh work folder. If the exports or the layout settings change, the tool refuses to reuse an old work folder and says so.
+- **Look before the long part:** `--only plan` takes seconds, prints which levels are used and writes `plan_levels.png` into the work
+  folder (a map of the detail level used everywhere, the Condor tile grid with texture sizes, and the runways).
+
+Typical run for the Orly export:
+```
+cd /Users/lennard/Desktop/condor3-mod
+python3 tools/tiles2condor.py /Users/lennard/Downloads/earth-3dtiles-66e4c38d examples/orly.json /Users/lennard/Condor3/Landscapes/Orly2 --only plan
+open /Users/lennard/Downloads/earth-3dtiles-66e4c38d/_condor_work/plan_levels.png
+python3 tools/tiles2condor.py /Users/lennard/Downloads/earth-3dtiles-66e4c38d examples/orly.json /Users/lennard/Condor3/Landscapes/Orly2
+```
+The last line of the airports stage prints `TPPosX / TPPosY / TPPosZ` for each airport (for the flight plan file); in the game simply pick the
+landscape and an airport in the flight planner.
 
 ## Input
-- `tileset.json` + `tiles/*.glb`; optional `location.json` (lat/lon bounds per tile, speeds up planning).
+- `tileset.json` + `tiles/*.glb`; `location.json` (lat/lon rectangle and level of every tile) is used when present and makes planning exact.
+  Without it the footprint is taken from each mesh and the level is estimated from its width.
 - GLB: plain glTF 2.0, float positions relative to the tile centre, glTF Y-up (`ecef = M * (x, -z, y)`, M = accumulated tileset transforms),
   u16/u32 indices, one PNG/JPEG texture per primitive, no Draco. Heights are used as altitude directly (Orly comes out at 83-89 m, correct);
   `height_offset` in the config shifts them.
-- Only the finest tiles are used: a tileset node that has children is replaced by them.
+
+## Detail levels: the finest tile wins
+- For every tile the tool looks for FINER tiles (in any export) that overlap its lat/lon rectangle. Those parts are holes in the coarse tile.
+  The rectangles of such exports subdivide each other exactly, so the holes are exact (kept as a small grid per tile, up to 6 levels deep).
+- Ground photo and heights: a coarse tile is not drawn into its holes (decided per pixel, so the seam is exact).
+- 3D objects: a coarse tile drops the triangles whose centre lies in a hole (the seam can be off by one triangle, a few metres).
+- A tile completely covered by finer ones is not read at all. The plan report lists, per level: tiles, used whole, partly hidden, fully hidden.
+- Orly example: 1120 level-18 tiles used whole; of 560 level-17 tiles 247 are fully hidden, 26 partly hidden, the rest used whole.
+- Known limits: colours and heights can jump at a level border (different source imagery); the terrain is smoothed across it, the photo is not.
+  The source also splits tiles by height; a tall object whose top is in another tile than its base could be cut wrongly at a level border.
+
+## Texture size per Condor tile
+Each Condor tile (5.76 km) gets the texture size matching the finest detail that covers a real share of it:
+source detail about 0.8 m/px -> 8192 px, 1.6 -> 4096, 3.2 -> 2048, coarser -> 1024; tiles without data get a 512 px filler.
+`texture_size` caps the largest size, `min_texture_size` the smallest, `detail_min_share` (default 0.03) is the share of the tile a detail
+level must cover to count. Rendering (stage raster) happens per Condor tile at that size, so coarse surroundings are fast and small.
 
 ## Config (JSON)
 ```json
 {
   "margin_tiles": 1,            // empty Condor tiles (5.76 km) added on every side; the glider cannot fly within ~5 km of the border
-  "texture_size": 8192,         // pixels per Condor tile for tiles with data (8192 = 0.70 m/px, 4096 = 1.4 m/px)
+  "texture_size": 8192,         // largest texture size per Condor tile
+  "min_texture_size": 1024,     // smallest size for tiles that have data
+  "detail_min_share": 0.03,
   "height_offset": 0.0,         // metres added to all heights
   "ground_filter_m": 35,        // things narrower than about twice this are removed from the ground model (buildings, trees)
   "utm_zone": null,             // default: the zone of the data
-  "objects": { "enabled": true, "min_height": 2.5, "sink": 1.5 },
+  "objects": { "enabled": true, "min_height": 2.5, "sink": 1.5, "min_level": 0 },
   "airports": [
     { "name": "Orly-06",
       "runway": { "from": [48.7196927, 2.3156802], "to": [48.7361067, 2.362025], "width": 45, "surface": "asphalt" },
@@ -39,15 +74,16 @@ what already exists in the work folder (default `<export_dir>/_condor_work`) or 
 - One entry = one Condor airport = ONE runway (Condor's `.apt` knows a single runway per airport). `from` / `to` are the lat, lon of the two
   runway ends; the glider starts 200 m after `from`, heading towards `to`. Several runways of one real airport = several entries
   (`examples/orly.json` has Orly's three). Optional: `primary_reversed`, `tow_primary_left`, `tow_secondary_left`.
+- `objects.min_level`: source tiles coarser than this level produce no 3D objects (their area is photo only). `"objects": false` disables 3D.
 - (JSON has no comments; the `//` notes above are explanation only.)
 
 ## What the stages do
 | stage | work / output files | what happens |
 |---|---|---|
-| plan | `plan.json` | UTM zone, landscape size = data extent rounded up to tiles + margin, data centred; list of leaf tiles |
-| raster | `ras_BX_BY.npz` (2048 px blocks) | top-down z-buffer render of all triangles (`raster_tris`): colour (orthophoto) + highest surface height per pixel |
+| plan | `plan.json`, `plan_levels.png` | UTM zone, landscape size = data extent rounded up to tiles + margin, data centred; all tiles of all exports with the share hidden by finer tiles; texture size per Condor tile |
+| raster | `ras_TXTY_i_j.npz` (blocks of at most 2048 px per Condor tile) | top-down z-buffer render of all visible triangles (`raster_tris`) at the tile's own resolution: colour (orthophoto) + highest surface height per pixel |
 | terrain | `grid.npz`, `terrain.npy`, `valid.npy`; `.trn`, `HeightMaps/*.tr3`, `22.5m/*.tr3f`, `.tha` | ground model on a 5.6 m grid: lowest height per cell, morphological opening (removes buildings/trees), blur; extra smoothing inside airport grounds; the area without data is filled from the edges. A float `.tr3f` is written for EVERY tile, so the rendered terrain is exact to the centimetre |
-| textures | `Textures/t*.dds`, `empty.dds`, `.bmp` | orthophoto as DXT1 tile textures (data tiles at `texture_size`, filler tiles 512 px blurred edge colours), flight-planner map |
+| textures | `Textures/t*.dds`, `empty.dds`, `.bmp` | orthophoto as DXT1 tile textures (data tiles at their planned size, filler tiles 512 px blurred edge colours), flight-planner map |
 | base | `.ini`, `ForestMaps/*.for` (empty), `.fha`, `.tm3`, `.obj`, `.air`, `.aha`, `.oha` | forest maps are empty on purpose (trees come with the 3D data); thermal map: green 102, everything else 178 |
 | airports | `.apt`, `.cup`, `Airports/<A>G.c3d`, `<A>O.c3d`, `Airports/Textures/<A>/<A>_Ground.dds` | see below |
 | objects | `Autogen/oXXYY.c3d`, `Autogen/Textures/aXXYY_NNN.dds`, `.oha` | every triangle with a corner more than `min_height` above the ground model is kept; textures packed into 2048 px atlas pages (one C3D object per page); feet of walls pushed `sink` m into the ground; one file per Condor tile, MD5 in `.oha` |
@@ -62,7 +98,13 @@ what already exists in the work folder (default `<export_dir>/_condor_work`) or 
 - Ground areas of several airports must not overlap; a cell belongs to the first airport that claims it.
 - O file: one windsock 35 m left of the runway, 320 m after its start.
 
-## Verified in game (Orly, 4 x 4 tiles)
+## Status of testing
+The multi-level / multi-export / per-tile-size version (session 6, second half) was only run on a 21-tile sample across a level border
+(all stages complete, no gaps in the orthophoto at the seam). It has NOT been run on the full Orly export or looked at in the game yet:
+the user runs the builds himself. `Landscapes/Orly` on disk is from the first version (single resolution; coarse and fine copies overlap
+in a ring of 26 tiles around the detailed zone).
+
+## Verified in game with the first version (Orly, 4 x 4 tiles)
 Flight planner shows the photo map and the three runways in place; flight starts on runway 06; photo terrain; buildings, hangars, terminal and
 control tower stand in 3D. Game log: memory 1.6 of 4 GB (the game is a 32-bit process). Numbers: 2.6 M object triangles, 170 MB of C3D,
 50 atlas pages, four 8192 px tile textures; conversion about 6 minutes in total.

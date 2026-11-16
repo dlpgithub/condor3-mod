@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-"""tiles2condor.py - build a Condor 3 landscape from a 3D Tiles export (one GLB per tile, e.g. from the "earth-rea" tile library).
+"""tiles2condor.py - build a Condor 3 landscape from 3D Tiles exports (one GLB per tile, e.g. from the "earth-rea" tile library).
 
-usage:  tiles2condor.py <export_dir> <config.json> <Landscapes_dir>/<Name> [--work DIR] [--budget SECONDS] [--only STAGE]
+usage:  tiles2condor.py <export_dir> [<export_dir> ...] <config.json> <Landscapes_dir>/<Name> [--work DIR] [--budget SECONDS] [--only STAGE]
 
-  export_dir   folder with tileset.json and tiles/*.glb (3D Tiles 1.1, positions = WGS84 ECEF via tileset transforms, glTF Y-up)
+  export_dir   one or more folders with tileset.json, tiles/*.glb and (recommended) location.json. Several exports are merged; a tile that
+               occurs twice is used once. The exports may mix any number of detail levels: at every place the FINEST tile wins.
   config.json  landscape options and the airports (see docs/TILES2CONDOR.md)
   output       the landscape folder to create (its name is the landscape name)
 
-The work is done in resumable stages (each stage skips what already exists in the work folder):
-  plan      projection (UTM zone of the data), landscape grid, list of leaf tiles
-  raster    top-down render of the meshes into colour + height blocks (orthophoto and surface model)
+The work is done in resumable stages (each stage skips what already exists in the work folder / output):
+  plan      projection, landscape grid, which tile is visible where, texture size per Condor tile; writes plan_levels.png (look at it!)
+  raster    top-down render of the meshes into colour + height blocks (orthophoto and surface model), per Condor tile at its own resolution
   terrain   ground model from the surface model, airports smoothed -> .trn, .tr3, .tr3f, .tha
   textures  tile textures (DXT1 with mips), flight-planner map
-  base      ini, forest maps, thermal map, hashes, empty object/airspace lists, waypoints
-  airports  .apt, airport ground meshes cut exactly from the terrain, aerial sub-textures, windsocks
+  base      ini, forest maps, thermal map, hashes, empty object/airspace lists
+  airports  .apt, .cup, airport grass meshes cut exactly from the terrain, aerial sub-textures, windsocks
   objects   everything standing above the ground (buildings, trees) as textured scenery meshes
---budget makes a run stop cleanly after that many seconds (rerun to continue); default: no limit.
-Needs python3 with numpy and Pillow. Formats: docs/TERRAIN_FORMAT.md.
+--only STAGE runs just that stage (plan, raster, terrain, textures, base, airports, objects).
+--budget makes a run stop cleanly after that many seconds (exit code 2; run the same command again to continue).
+The work folder defaults to <first export_dir>/_condor_work. Needs python3 with numpy and Pillow. Formats: docs/TERRAIN_FORMAT.md.
 """
 import sys, os, json, struct, math, time, io, hashlib
 import numpy as np
@@ -63,16 +65,15 @@ def utm_inverse(E, N, zone, south=False):
 
 # ------------------------------------------------------------------ 3D Tiles input -----------------------------------------------------
 def read_tileset(export):
-    """leaf contents of the tileset: [(glb path, centre ECEF)]. A node with children is replaced by them (refine REPLACE)."""
-    t = json.load(open(os.path.join(export, 'tileset.json'))); leaves = []
+    """every tile with content: [(glb path, accumulated transform)]. Which tile is visible where is decided later (finest wins)."""
+    t = json.load(open(os.path.join(export, 'tileset.json'))); found = []
     def mat(n): return np.array(n['transform'], float).reshape(4, 4).T if 'transform' in n else np.eye(4)
-    def walk(n, M, top):
-        M = M @ mat(n); kids = n.get('children', [])
-        if 'content' in n and (top or not kids or n.get('refine', 'REPLACE') == 'ADD'):
-            leaves.append((os.path.join(export, n['content']['uri']), M))
-        for c in kids: walk(c, M, False)
-    walk(t['root'], np.eye(4), True)
-    return leaves
+    def walk(n, M):
+        M = M @ mat(n)
+        if 'content' in n: found.append((os.path.join(export, n['content']['uri']), M))
+        for c in n.get('children', []): walk(c, M)
+    walk(t['root'], np.eye(4))
+    return found
 
 def load_glb(path, M):
     """-> list of primitives (ecef (n,3) float64, uv (n,2), triangles (m,3), PIL image). glTF is Y-up: ecef = M * (x, -z, y)."""
@@ -101,45 +102,148 @@ def load_glb(path, M):
     return out
 
 class Plan:
-    """landscape grid. World frame of the game: x = E0 - easting (west), y = northing - N0 (north)."""
-    def __init__(s, d): s.__dict__.update(d)
+    """landscape grid + the source tiles. World frame of the game: x = E0 - easting (west), y = northing - N0 (north)."""
+    def __init__(s, d):
+        s.__dict__.update(d); t = s.tiles
+        s._lv = np.array([q['level'] for q in t]); s._S = np.array([q['south'] for q in t]); s._N = np.array([q['north'] for q in t])
+        s._W = np.array([q['west'] for q in t]); s._E = np.array([q['east'] for q in t]); s._masks = {}
     def world(s, lat, lon):
         E, N = utm_forward(lat, lon, s.zone, s.south); return s.E0-E, N-s.N0
     def latlon(s, x, y): return utm_inverse(s.E0-x, s.N0+y, s.zone, s.south)
+    def texsize(s, tx, ty): return int(s.tex.get(f'{tx},{ty}', 0))
+    def hole_mask(s, i):
+        """Where tile i is hidden by FINER tiles: boolean K x K grid over its lat/lon rectangle ([row from south][column from west]), or None.
+        The footprints of an octree/quadtree export subdivide each other exactly, so a 2^d grid (d = level difference, at most 6) is exact."""
+        if i in s._masks: return s._masks[i]
+        t = s.tiles[i]; eps = 1e-9
+        fin = np.nonzero((s._lv > t['level']) & (s._W < t['east']-eps) & (s._E > t['west']+eps) & (s._S < t['north']-eps) & (s._N > t['south']+eps))[0]
+        m = None
+        if len(fin):
+            K = 2**int(min(6, s._lv[fin].max()-t['level']))
+            cu = t['west'] + (np.arange(K)+0.5)/K*(t['east']-t['west']); cv = t['south'] + (np.arange(K)+0.5)/K*(t['north']-t['south'])
+            m = np.zeros((K, K), bool)
+            for j in fin: m |= ((cv[:, None] > s._S[j]) & (cv[:, None] < s._N[j])) & ((cu[None, :] > s._W[j]) & (cu[None, :] < s._E[j]))
+            if not m.any(): m = None
+        s._masks[i] = m
+        return m
+    def hole_coords(s, i, lat, lon):
+        """normalised position of points inside tile i's rectangle (for looking up hole_mask)"""
+        t = s.tiles[i]; return (lon-t['west'])/(t['east']-t['west']), (lat-t['south'])/(t['north']-t['south'])
 
-def stage_plan(export, cfg, work):
+def in_hole(mask, hu, hv):
+    K = mask.shape[0]
+    return mask[np.clip((hv*K).astype(np.int64), 0, K-1), np.clip((hu*K).astype(np.int64), 0, K-1)]
+
+TEX_SIZES = (1024, 2048, 4096, 8192)
+
+def stage_plan(exports, cfg, work):
+    sig = hashlib.md5(json.dumps([[os.path.abspath(e) for e in exports], {k: cfg.get(k) for k in ('margin_tiles', 'texture_size', 'min_texture_size', 'utm_zone', 'height_offset', 'detail_min_share')}], sort_keys=True).encode()).hexdigest()
     pp = f'{work}/plan.json'
-    if os.path.exists(pp): return Plan(json.load(open(pp)))
-    leaves = read_tileset(export)
-    loc = json.load(open(os.path.join(export, 'location.json'))) if os.path.exists(os.path.join(export, 'location.json')) else None
-    bounds = {t['path']: t for t in loc['tiles']} if loc else {}
-    cen = np.array([M[:3, 3] for _, M in leaves]); lat, lon, _ = ecef_to_lla(cen)
-    zone = int(cfg.get('utm_zone') or (math.floor((float(np.median(lon))+180)/6)+1)); south = bool(float(np.median(lat)) < 0)
-    tiles = []
-    for (p, M), la, lo in zip(leaves, lat, lon):
-        b = bounds.get(os.path.basename(p)[:-4])
-        if b: cl = [(b['south'], b['west']), (b['south'], b['east']), (b['north'], b['west']), (b['north'], b['east'])]
-        else:                                                   # no location.json: read the mesh once for its extent
-            ll = [ecef_to_lla(e)[:2] for e, _, _, _ in load_glb(p, M)]
-            if not ll: continue
-            la_ = np.concatenate([a for a, _ in ll]); lo_ = np.concatenate([o for _, o in ll]); cl = [(la_.min(), lo_.min()), (la_.min(), lo_.max()), (la_.max(), lo_.min()), (la_.max(), lo_.max())]
-        E, N = utm_forward(np.array([c[0] for c in cl]), np.array([c[1] for c in cl]), zone, south)
-        tiles.append(dict(glb=p, M=M.tolist(), E0=float(E.min()), E1=float(E.max()), N0=float(N.min()), N1=float(N.max())))
-    Emin = min(t['E0'] for t in tiles); Emax = max(t['E1'] for t in tiles); Nmin = min(t['N0'] for t in tiles); Nmax = max(t['N1'] for t in tiles)
+    if os.path.exists(pp):
+        d = json.load(open(pp))
+        if d.get('sig') != sig:
+            raise SystemExit(f'The exports or the layout settings changed since the work folder {work} was started.\n'
+                             f'Use a new work folder (--work DIR) or delete this one, then run again.')
+        return Plan(d)
+    # ---- collect the tiles of all exports
+    tiles = {}; nodup = 0
+    for ex in exports:
+        lp = os.path.join(ex, 'location.json'); loc = {t['path']: t for t in json.load(open(lp))['tiles']} if os.path.exists(lp) else {}
+        for p, M in read_tileset(ex):
+            nm = os.path.basename(p)[:-4]
+            if nm in tiles: nodup += 1; continue
+            if not os.path.exists(p) or os.path.getsize(p) < 100: continue
+            b = loc.get(nm)
+            if b: rec = dict(south=b['south'], north=b['north'], west=b['west'], east=b['east'], level=int(b.get('level', len(nm))))
+            else:                                                   # no location.json: footprint from the mesh, level from the footprint width
+                ll = [ecef_to_lla(e)[:2] for e, _, _, _ in load_glb(p, M)]
+                if not ll: continue
+                la = np.concatenate([a for a, _ in ll]); lo = np.concatenate([o for _, o in ll])
+                rec = dict(south=float(la.min()), north=float(la.max()), west=float(lo.min()), east=float(lo.max()))
+                rec['level'] = int(round(math.log2(90.0/max(rec['east']-rec['west'], 1e-9))))+3
+            rec.update(name=nm, glb=p, M=M.tolist()); tiles[nm] = rec
+    tiles = list(tiles.values())
+    if not tiles: raise SystemExit('no tiles found in the export folder(s)')
+    lat0 = float(np.median([t['south'] for t in tiles])); lon0 = float(np.median([t['west'] for t in tiles]))
+    zone = int(cfg.get('utm_zone') or (math.floor((lon0+180)/6)+1)); south = lat0 < 0
+    for t in tiles:
+        E, N = utm_forward(np.array([t['south'], t['south'], t['north'], t['north']]), np.array([t['west'], t['east'], t['west'], t['east']]), zone, south)
+        t.update(e0=float(E.min()), e1=float(E.max()), n0=float(N.min()), n1=float(N.max()))
+    Emin = min(t['e0'] for t in tiles); Emax = max(t['e1'] for t in tiles); Nmin = min(t['n0'] for t in tiles); Nmax = max(t['n1'] for t in tiles)
     m = int(cfg.get('margin_tiles', 1))
     nx = max(1, math.ceil((Emax-Emin)/TILE))+2*m; ny = max(1, math.ceil((Nmax-Nmin)/TILE))+2*m
     E0 = float(round((Emin+Emax)/2 + nx*TILE/2)); N0 = float(round((Nmin+Nmax)/2 - ny*TILE/2))      # east edge easting, south edge northing
-    plan = dict(zone=zone, south=south, nx=nx, ny=ny, E0=E0, N0=N0, res=TILE/int(cfg.get('texture_size', 8192)), tex=int(cfg.get('texture_size', 8192)),
-                data=dict(E0=Emin, E1=Emax, N0=Nmin, N1=Nmax), height_offset=float(cfg.get('height_offset', 0.0)), tiles=tiles)
-    json.dump(plan, open(pp, 'w'))
-    log(f'plan: UTM zone {zone}{"S" if south else "N"}, landscape {nx} x {ny} tiles ({nx*TILE/1000:.1f} x {ny*TILE/1000:.1f} km), data {(Emax-Emin)/1000:.1f} x {(Nmax-Nmin)/1000:.1f} km, {len(tiles)} source tiles')
-    return Plan(plan)
+    d = dict(sig=sig, zone=zone, south=south, nx=nx, ny=ny, E0=E0, N0=N0, data=dict(e0=Emin, e1=Emax, n0=Nmin, n1=Nmax),
+             height_offset=float(cfg.get('height_offset', 0.0)), tiles=tiles, tex={})
+    P = Plan(d)
+    # ---- finest wins: how much of every tile is hidden by finer ones
+    for i, t in enumerate(tiles):
+        mk = P.hole_mask(i); t['hidden'] = float(mk.mean()) if mk is not None else 0.0
+    # ---- texture size per Condor tile from the detail of the tiles visible in it
+    smax = int(cfg.get('texture_size', 8192)); smin = int(cfg.get('min_texture_size', 1024)); share = float(cfg.get('detail_min_share', 0.03))
+    need = {}
+    for t in tiles:
+        if t['hidden'] >= 1: continue
+        texel = (t['e1']-t['e0'])/256.0                                # source textures are about 256 px across a tile
+        S = next((s for s in TEX_SIZES if TILE/s <= texel*1.2), TEX_SIZES[-1]); S = int(min(max(S, smin), smax))
+        for tx in range(max(0, int((E0-t['e1'])//TILE)), min(nx-1, int((E0-t['e0'])//TILE))+1):
+            for ty in range(max(0, int((t['n0']-N0)//TILE)), min(ny-1, int((t['n1']-N0)//TILE))+1):
+                ov = max(0, min(t['e1'], E0-tx*TILE)-max(t['e0'], E0-(tx+1)*TILE))*max(0, min(t['n1'], N0+(ty+1)*TILE)-max(t['n0'], N0+ty*TILE))
+                if ov > 0: need.setdefault((tx, ty), {}).setdefault(S, 0.0); need[(tx, ty)][S] += ov*(1-t['hidden'])
+    for (tx, ty), by in need.items():
+        cum = 0.0; pick = min(by)
+        for S in sorted(by, reverse=True):                               # the largest size that a real share of the tile needs
+            cum += by[S]
+            if cum >= share*TILE*TILE: pick = S; break
+        d['tex'][f'{tx},{ty}'] = pick
+    json.dump(d, open(pp, 'w'))
+    P = Plan(d); report(P, cfg, work, nodup)
+    return P
+
+def report(plan, cfg, work, nodup=0):
+    """summary on the console and plan_levels.png: which detail level is used where"""
+    lv = sorted(set(t['level'] for t in plan.tiles))
+    log(f'plan: UTM zone {plan.zone}{"S" if plan.south else "N"}, landscape {plan.nx} x {plan.ny} tiles = {plan.nx*TILE/1000:.1f} x {plan.ny*TILE/1000:.1f} km, '
+        f'data {(plan.data["e1"]-plan.data["e0"])/1000:.1f} x {(plan.data["n1"]-plan.data["n0"])/1000:.1f} km' + (f', {nodup} duplicate tiles ignored' if nodup else ''))
+    log('  level   tiles   used whole   partly hidden   fully hidden (finer tiles cover them)   approx. source detail')
+    for L in lv:
+        ts = [t for t in plan.tiles if t['level'] == L]
+        log(f'  {L:5d} {len(ts):7d} {sum(t["hidden"] == 0 for t in ts):12d} {sum(0 < t["hidden"] < 1 for t in ts):15d} {sum(t["hidden"] >= 1 for t in ts):14d}'
+            f'{"":27s}{np.median([(t["e1"]-t["e0"])/256 for t in ts]):.1f} m/px')
+    cnt = {}
+    for v in plan.tex.values(): cnt[v] = cnt.get(v, 0)+1
+    log('  Condor tiles by texture size: ' + ', '.join(f'{cnt[k]} x {k} px' for k in sorted(cnt, reverse=True)) + f', {plan.nx*plan.ny-len(plan.tex)} filler')
+    try:
+        from PIL import ImageDraw
+        sc = 900.0/max(plan.nx, plan.ny)/TILE; W = int(plan.nx*TILE*sc); H = int(plan.ny*TILE*sc); im = Image.new('RGB', (W+190, max(H, 40+18*len(lv))), (40, 40, 40)); dr = ImageDraw.Draw(im)
+        Ww = plan.E0-plan.nx*TILE; Nn = plan.N0+plan.ny*TILE
+        cols = [(70, 90, 160), (60, 150, 170), (70, 170, 90), (190, 190, 60), (220, 140, 50), (220, 70, 60), (200, 60, 170), (240, 240, 240)]
+        col = {L: cols[min(k, len(cols)-1)] for k, L in enumerate(lv)}
+        for i in np.argsort(plan._lv, kind='stable'):                    # coarse first, finer painted over them = what the build uses
+            t = plan.tiles[i]
+            if t['hidden'] >= 1: continue
+            dr.rectangle(((t['e0']-Ww)*sc, (Nn-t['n1'])*sc, (t['e1']-Ww)*sc, (Nn-t['n0'])*sc), fill=col[t['level']])
+        for k in range(plan.nx+1): dr.line((k*TILE*sc, 0, k*TILE*sc, H), fill=(0, 0, 0))
+        for k in range(plan.ny+1): dr.line((0, k*TILE*sc, W, k*TILE*sc), fill=(0, 0, 0))
+        for tx in range(plan.nx):
+            for ty in range(plan.ny):
+                dr.text(((plan.nx-1-tx)*TILE*sc+4, (plan.ny-1-ty)*TILE*sc+3), f'{tx:02d}{ty:02d} {plan.texsize(tx, ty) or "fill"}', fill=(255, 255, 255))
+        for af in airfields(cfg, plan):
+            a = af.to_world(0, -af.len/2); b = af.to_world(0, af.len/2)
+            dr.line(((plan.E0-a[0]-Ww)*sc, (Nn-plan.N0-a[1])*sc, (plan.E0-b[0]-Ww)*sc, (Nn-plan.N0-b[1])*sc), fill=(255, 255, 255), width=3)
+            dr.text(((plan.E0-a[0]-Ww)*sc+5, (Nn-plan.N0-a[1])*sc+5), af.name, fill=(255, 255, 255))
+        for k, L in enumerate(lv):
+            dr.rectangle((W+12, 12+18*k, W+26, 24+18*k), fill=col[L]); dr.text((W+32, 12+18*k), f'level {L}', fill=(255, 255, 255))
+        dr.text((W+12, 20+18*len(lv)), 'north up; labels: Condor\ntile and texture size', fill=(200, 200, 200))
+        im.save(f'{work}/plan_levels.png'); log(f'  map of the detail levels: {work}/plan_levels.png')
+    except Exception as e: log('  (no preview picture:', e, ')')
 
 # ------------------------------------------------------------------ rasteriser ----------------------------------------------------------
-BLOCK = 2048          # raster block edge in pixels
+BLOCK = 2048          # largest raster block edge in pixels
 
-def raster_tris(px, py, z, uv, tri, tex, W, H, zbuf, rgb):
-    """top-down z-buffer render of textured triangles into zbuf (H,W) float32 (highest wins) and rgb (H,W,3)"""
+def raster_tris(px, py, z, uv, tri, tex, W, H, zbuf, rgb, hole=None):
+    """top-down z-buffer render of textured triangles into zbuf (H,W) float32 (highest wins) and rgb (H,W,3).
+    hole = (hu, hv, mask): per-vertex position in the tile's rectangle and the mask of the parts hidden by finer tiles (not drawn)"""
     X = px[tri]; Y = py[tri]; Z = z[tri]                                    # (n,3)
     x0 = np.floor(X.min(1)).astype(np.int64); x1 = np.ceil(X.max(1)).astype(np.int64)
     y0 = np.floor(Y.min(1)).astype(np.int64); y1 = np.ceil(Y.max(1)).astype(np.int64)
@@ -147,7 +251,8 @@ def raster_tris(px, py, z, uv, tri, tex, W, H, zbuf, rgb):
     keep = (np.abs(den) > 1e-9) & (x1 >= 0) & (y1 >= 0) & (x0 < W) & (y0 < H)
     size = np.maximum(x1-x0, y1-y0)+1
     th, tw = tex.shape[:2]; U = uv[tri]
-    for K in (4, 8, 16, 32, 64, 128, 256, 512, 1024):
+    if hole is not None: HU = hole[0][tri]; HV = hole[1][tri]
+    for K in (4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048):
         sel = np.nonzero(keep & (size <= K) & (size > (K//2 if K > 4 else 0)))[0]
         if not len(sel): continue
         o = np.arange(K, dtype=np.float32)+0.5
@@ -160,44 +265,63 @@ def raster_tris(px, py, z, uv, tri, tex, W, H, zbuf, rgb):
             d = den[q, None, None]
             l0 = ((yb-yc)*(gx-xc) + (xc-xb)*(gy-yc))/d; l1 = ((yc-ya)*(gx-xc) + (xa-xc)*(gy-yc))/d; l2 = 1-l0-l1
             ins = (l0 >= -1e-4) & (l1 >= -1e-4) & (l2 >= -1e-4) & (gx >= 0) & (gx < W) & (gy >= 0) & (gy < H)
+            if hole is not None and ins.any():
+                ins &= ~in_hole(hole[2], l0*HU[q, 0, None, None] + l1*HU[q, 1, None, None] + l2*HU[q, 2, None, None],
+                                l0*HV[q, 0, None, None] + l1*HV[q, 1, None, None] + l2*HV[q, 2, None, None])
             if not ins.any(): continue
             zz = (l0*Z[q, 0, None, None] + l1*Z[q, 1, None, None] + l2*Z[q, 2, None, None])[ins]
             uu = (l0*U[q, 0, 0, None, None] + l1*U[q, 1, 0, None, None] + l2*U[q, 2, 0, None, None])[ins]
             vv = (l0*U[q, 0, 1, None, None] + l1*U[q, 1, 1, None, None] + l2*U[q, 2, 1, None, None])[ins]
-            pix = (gy[np.broadcast_to(ins, ins.shape)] if False else np.broadcast_to(gy, ins.shape)[ins]).astype(np.int64)*W + np.broadcast_to(gx, ins.shape)[ins].astype(np.int64)
+            pix = np.broadcast_to(gy, ins.shape)[ins].astype(np.int64)*W + np.broadcast_to(gx, ins.shape)[ins].astype(np.int64)
             col = tex[np.clip((vv*th).astype(np.int64), 0, th-1), np.clip((uu*tw).astype(np.int64), 0, tw-1)]
             order = np.argsort(zz, kind='stable'); pix = pix[order]; zz = zz[order].astype(np.float32); col = col[order]
             win = zz > zbuf.ravel()[pix]
             zbuf.ravel()[pix[win]] = zz[win]; rgb.reshape(-1, 3)[pix[win]] = col[win]
 
-def block_path(work, bx, by): return f'{work}/ras_{bx:03d}_{by:03d}.npz'
+def block_path(work, tx, ty, i, j): return f'{work}/ras_{tx:02d}{ty:02d}_{i}_{j}.npz'
+
+def tile_frame(plan, tx, ty):
+    """(easting of the west edge, northing of the north edge, texture size, metres per pixel, block size, blocks per side) of a Condor tile"""
+    S = plan.texsize(tx, ty); bs = min(S, BLOCK) if S else 0
+    return plan.E0-(tx+1)*TILE, plan.N0+(ty+1)*TILE, S, (TILE/S if S else 0), bs, (S//bs if S else 0)
 
 def stage_raster(plan, work):
-    """blocks are indexed from the WEST edge (bx) and the NORTH edge (by) of the landscape, BLOCK pixels each at plan.res m/px"""
-    res = plan.res; Wwest = plan.E0 - plan.nx*TILE; Nnorth = plan.N0 + plan.ny*TILE; bs = BLOCK*res
-    nbx = int(round(plan.nx*TILE/bs)); nby = int(round(plan.ny*TILE/bs)); done = True
-    for bx in range(nbx):
-        for by in range(nby):
-            if os.path.exists(block_path(work, bx, by)): continue
-            e0 = Wwest + bx*bs; n1 = Nnorth - by*bs
-            src = [t for t in plan.tiles if t['E1'] > e0-2 and t['E0'] < e0+bs+2 and t['N1'] > n1-bs-2 and t['N0'] < n1+2]
-            if not src: continue
-            if out_of_time(): return False
-            zbuf = np.full((BLOCK, BLOCK), -1e9, np.float32); rgb = np.zeros((BLOCK, BLOCK, 3), np.uint8)
-            for t in src:
-                for ecef, uv, tri, im in load_glb(t['glb'], np.array(t['M'])):
-                    lat, lon, h = ecef_to_lla(ecef); E, N = utm_forward(lat, lon, plan.zone, plan.south)
-                    tex = np.asarray(im) if im is not None else np.full((2, 2, 3), 128, np.uint8)
-                    raster_tris((E-e0)/res, (n1-N)/res, h+plan.height_offset, uv, tri, tex, BLOCK, BLOCK, zbuf, rgb)
-            valid = zbuf > -1e8
-            np.savez(block_path(work, bx, by), rgb=rgb, z=np.where(valid, np.clip(np.rint((zbuf+500)*10), 1, 65535), 0).astype(np.uint16))
-            log(f'raster block {bx},{by}: {len(src)} source tiles, coverage {valid.mean()*100:.0f}%  ({time.time()-T0:.0f}s)')
-    return done
+    """every Condor tile that has data is rendered at its own resolution, in blocks (i from the west edge, j from the north edge)"""
+    for tx in range(plan.nx):
+        for ty in range(plan.ny):
+            ew, nn, S, res, bs, nb = tile_frame(plan, tx, ty)
+            if not S: continue
+            for i in range(nb):
+                for j in range(nb):
+                    bp = block_path(work, tx, ty, i, j)
+                    if os.path.exists(bp): continue
+                    e0 = ew + i*bs*res; n1 = nn - j*bs*res; ext = bs*res
+                    src = [k for k, t in enumerate(plan.tiles) if t['hidden'] < 1 and t['e1'] > e0-2 and t['e0'] < e0+ext+2 and t['n1'] > n1-ext-2 and t['n0'] < n1+2]
+                    if out_of_time(): return False
+                    zbuf = np.full((bs, bs), -1e9, np.float32); rgb = np.zeros((bs, bs, 3), np.uint8)
+                    for k in sorted(src, key=lambda k: plan.tiles[k]['level']):
+                        t = plan.tiles[k]; mk = plan.hole_mask(k)
+                        for ecef, uv, tri, im in load_glb(t['glb'], np.array(t['M'])):
+                            lat, lon, h = ecef_to_lla(ecef); E, N = utm_forward(lat, lon, plan.zone, plan.south)
+                            tex = np.asarray(im) if im is not None else np.full((2, 2, 3), 128, np.uint8)
+                            hole = (*plan.hole_coords(k, lat, lon), mk) if mk is not None else None
+                            raster_tris((E-e0)/res, (n1-N)/res, h+plan.height_offset, uv, tri, tex, bs, bs, zbuf, rgb, hole)
+                    valid = zbuf > -1e8
+                    np.savez(bp+'.tmp.npz', rgb=rgb, z=np.where(valid, np.clip(np.rint((zbuf+500)*10), 1, 65535), 0).astype(np.uint16)); os.replace(bp+'.tmp.npz', bp)
+                    log(f'raster tile {tx:02d}{ty:02d} ({S} px) block {i},{j}: {len(src)} source tiles, coverage {valid.mean()*100:.0f}%  ({time.time()-T0:.0f}s)')
+    return True
 
-def load_block(work, bx, by):
-    p = block_path(work, bx, by)
-    if not os.path.exists(p): return None, None
-    d = np.load(p); return d['rgb'], d['z']
+def load_tile_raster(plan, work, tx, ty):
+    """assembled raster of a Condor tile: rgb (S,S,3) uint8, z (S,S) uint16 (0 = no data, else (height+500)*10); None when the tile has no data"""
+    ew, nn, S, res, bs, nb = tile_frame(plan, tx, ty)
+    if not S: return None, None
+    rgb = np.zeros((S, S, 3), np.uint8); z = np.zeros((S, S), np.uint16)
+    for i in range(nb):
+        for j in range(nb):
+            bp = block_path(work, tx, ty, i, j)
+            if not os.path.exists(bp): raise SystemExit(f'raster block {bp} is missing: run the raster stage first')
+            d = np.load(bp); rgb[j*bs:(j+1)*bs, i*bs:(i+1)*bs] = d['rgb']; z[j*bs:(j+1)*bs, i*bs:(i+1)*bs] = d['z']
+    return rgb, z
 
 # ------------------------------------------------------------------ small raster helpers ------------------------------------------------
 G = 5.625                                    # working grid for terrain and colour statistics [m] (1024 cells per Condor tile)
@@ -239,21 +363,22 @@ def pushpull(a, valid):
     return np.where((v[..., None] if a.ndim == 3 else v) > 0, a, up)
 
 def grid_stats(plan, work):
-    """per G-cell statistics of the raster blocks, image orientation (row 0 = north edge, column 0 = west edge):
+    """per G-cell statistics of the rasters, image orientation (row 0 = north edge, column 0 = west edge):
     zmin (lowest surface height in the cell, nan = no data), rgb mean"""
     p = f'{work}/grid.npz'
     if os.path.exists(p):
         d = np.load(p); return d['zmin'], d['rgb']
-    f = int(round(G/plan.res)); cb = BLOCK//f; W = plan.nx*1024; H = plan.ny*1024
+    W = plan.nx*1024; H = plan.ny*1024
     zmin = np.full((H, W), np.nan, np.float32); rgb = np.zeros((H, W, 3), np.float32)
-    for by in range(H//cb):
-        for bx in range(W//cb):
-            c, z = load_block(work, bx, by)
+    for tx in range(plan.nx):
+        for ty in range(plan.ny):
+            c, z = load_tile_raster(plan, work, tx, ty)
             if c is None: continue
-            zz = np.where(z > 0, z.astype(np.float32)/10-500, np.inf).reshape(cb, f, cb, f); v = (z > 0).reshape(cb, f, cb, f)
+            f = c.shape[0]//1024; r0 = (plan.ny-1-ty)*1024; c0 = (plan.nx-1-tx)*1024
+            v = (z > 0).reshape(1024, f, 1024, f); zz = np.where(z > 0, z.astype(np.float32)/10-500, np.inf).reshape(1024, f, 1024, f)
             m = zz.min((1, 3)); n = v.sum((1, 3))
-            zmin[by*cb:(by+1)*cb, bx*cb:(bx+1)*cb] = np.where(n > 0, m, np.nan)
-            rgb[by*cb:(by+1)*cb, bx*cb:(bx+1)*cb] = (c.reshape(cb, f, cb, f, 3)*v[..., None]).sum((1, 3))/np.maximum(n, 1)[..., None]
+            zmin[r0:r0+1024, c0:c0+1024] = np.where(n > 0, m, np.nan)
+            rgb[r0:r0+1024, c0:c0+1024] = (c.reshape(1024, f, 1024, f, 3)*v[..., None]).sum((1, 3), dtype=np.float32)/np.maximum(n, 1)[..., None]
     np.savez(p, zmin=zmin, rgb=rgb)
     return zmin, rgb
 
@@ -358,23 +483,25 @@ def stage_textures(plan, work, out, name):
             for ch in range(3):
                 b, _ = box_blur(f[..., ch], 16); f[..., ch] = np.where(valid, f[..., ch], b)
         np.save(fp, f.astype(np.float32))
-    fill = np.load(fp); bpt = plan.tex//BLOCK; rng = np.random.default_rng(7)
+    fill = np.load(fp); rng = np.random.default_rng(7)
     for tx in range(plan.nx):
         for ty in range(plan.ny):
             tp = f'{out}/Textures/t{tx:02d}{ty:02d}.dds'
             if os.path.exists(tp): continue
             if out_of_time(): return False
             cw = plan.nx-1-tx; rn = plan.ny-1-ty                                 # tile position counted from the west / north edge
-            blocks = {(i, j): load_block(work, cw*bpt+i, rn*bpt+j) for i in range(bpt) for j in range(bpt)}
             fg = fill[rn*1024:(rn+1)*1024, cw*1024:(cw+1)*1024]
-            if all(b[0] is None for b in blocks.values()):                        # filler tile: small texture from the extended colours
+            c, z = load_tile_raster(plan, work, tx, ty)
+            if c is None:                                                         # filler tile: small texture from the extended colours
                 img = np.clip(fg.reshape(512, 2, 512, 2, 3).mean((1, 3)) + rng.normal(0, 4, (512, 512, 1)), 0, 255).astype(np.uint8)
             else:
-                S = plan.tex; img = np.empty((S, S, 3), np.uint8); f = S//1024
-                for (i, j), (c, z) in blocks.items():
-                    fb = np.repeat(np.repeat(fg[j*BLOCK//f:(j+1)*BLOCK//f, i*BLOCK//f:(i+1)*BLOCK//f], f, 0), f, 1)
-                    fb = np.clip(fb + rng.normal(0, 4, (BLOCK, BLOCK, 1)), 0, 255).astype(np.uint8)
-                    img[j*BLOCK:(j+1)*BLOCK, i*BLOCK:(i+1)*BLOCK] = fb if c is None else np.where((z > 0)[..., None], c, fb)
+                S = c.shape[0]; f = S//1024; img = c
+                for r in range(0, 1024, 128):                                     # where the tile has no data: extended colours with a little noise
+                    zz = z[r*f:(r+128)*f]
+                    if (zz > 0).all(): continue
+                    fb = np.repeat(np.repeat(fg[r:r+128], f, 0), f, 1)
+                    fb = np.clip(fb + rng.normal(0, 4, (128*f, S, 1)), 0, 255).astype(np.uint8)
+                    img[r*f:(r+128)*f] = np.where((zz > 0)[..., None], img[r*f:(r+128)*f], fb)
             dds.write_dxt(tp+'.tmp', img); os.replace(tp+'.tmp', tp)
             log(f'texture t{tx:02d}{ty:02d} {img.shape[0]} px  ({time.time()-T0:.0f}s)')
     dds.write_dxt(f'{out}/Textures/empty.dds', np.full((256, 256, 3), np.clip(fill.mean((0, 1)), 0, 255).astype(np.uint8), np.uint8), np.full((256, 256), 255, np.uint8))
@@ -402,22 +529,26 @@ def stage_base(plan, cfg, work, out, name, trn):
         open(f'{out}/{name}.oha', 'wb').write(('\r\n'.join(f'{tx*1000+ty:06d}' for tx in range(plan.nx) for ty in range(plan.ny))+'\r\n').encode())
 
 # ------------------------------------------------------------------ airports ----------------------------------------------------------------
-def crop_ortho(plan, work, e0, e1, n0, n1, step):
-    """orthophoto of the UTM rectangle, every step-th raster pixel; returns rgb (h,w,3), valid (h,w), and the exact bounds used"""
-    res = plan.res; Ww = plan.E0 - plan.nx*TILE; Nn = plan.N0 + plan.ny*TILE
-    c0 = int(math.floor((e0-Ww)/res)); c1 = int(math.ceil((e1-Ww)/res)); r0 = int(math.floor((Nn-n1)/res)); r1 = int(math.ceil((Nn-n0)/res))
-    w = (c1-c0)//step//4*4; h = (r1-r0)//step//4*4; c1 = c0+w*step; r1 = r0+h*step
+def crop_ortho(plan, work, e0, e1, n0, n1, max_px=20e6):
+    """north-up orthophoto of a UTM rectangle at the finest resolution of the Condor tiles it touches (coarsened to stay below max_px);
+    returns rgb (h,w,3), valid (h,w) and the exact bounds used"""
+    txs = range(max(0, int((plan.E0-e1)//TILE)), min(plan.nx-1, int((plan.E0-e0)//TILE))+1)
+    tys = range(max(0, int((n0-plan.N0)//TILE)), min(plan.ny-1, int((n1-plan.N0)//TILE))+1)
+    sizes = [plan.texsize(tx, ty) for tx in txs for ty in tys if plan.texsize(tx, ty)]
+    res = TILE/max(sizes) if sizes else TILE/1024
+    while (e1-e0)*(n1-n0)/res**2 > max_px: res *= 2
+    w = max(4, int((e1-e0)/res)//4*4); h = max(4, int((n1-n0)/res)//4*4); e1 = e0+w*res; n0 = n1-h*res
     rgb = np.zeros((h, w, 3), np.uint8); val = np.zeros((h, w), bool)
-    for bx in range(c0//BLOCK, (c1-1)//BLOCK+1):
-        for by in range(r0//BLOCK, (r1-1)//BLOCK+1):
-            c, z = load_block(work, bx, by)
-            if c is None: continue
-            cols = np.arange(c0, c1, step); rows = np.arange(r0, r1, step)
-            mc = (cols >= bx*BLOCK) & (cols < (bx+1)*BLOCK); mr = (rows >= by*BLOCK) & (rows < (by+1)*BLOCK)
-            if not mc.any() or not mr.any(): continue
-            sub = c[np.ix_(rows[mr]-by*BLOCK, cols[mc]-bx*BLOCK)]; sz = z[np.ix_(rows[mr]-by*BLOCK, cols[mc]-bx*BLOCK)]
-            rgb[np.ix_(np.nonzero(mr)[0], np.nonzero(mc)[0])] = sub; val[np.ix_(np.nonzero(mr)[0], np.nonzero(mc)[0])] = sz > 0
-    return rgb, val, (Ww+c0*res, Ww+c1*res, Nn-r1*res, Nn-r0*res)
+    E = e0+(np.arange(w)+0.5)*res; N = n1-(np.arange(h)+0.5)*res
+    for tx in txs:
+        for ty in tys:
+            ew, nn, S, rt, bs, nb = tile_frame(plan, tx, ty)
+            mc = (E >= ew) & (E < ew+TILE); mr = (N <= nn) & (N > nn-TILE)
+            if not S or not mc.any() or not mr.any(): continue
+            c, z = load_tile_raster(plan, work, tx, ty)
+            cc = np.clip(((E[mc]-ew)/rt).astype(np.int64), 0, S-1); rr = np.clip(((nn-N[mr])/rt).astype(np.int64), 0, S-1)
+            rgb[np.ix_(np.nonzero(mr)[0], np.nonzero(mc)[0])] = c[np.ix_(rr, cc)]; val[np.ix_(np.nonzero(mr)[0], np.nonzero(mc)[0])] = z[np.ix_(rr, cc)] > 0
+    return rgb, val, (e0, e1, n0, n1)
 
 def box(cx, cy, z0, w, d, h):
     x0, x1, y0, y1 = cx-w/2, cx+w/2, cy-d/2, cy+d/2; z1 = z0+h
@@ -460,9 +591,7 @@ def stage_airports(plan, cfg, work, out, name):
         # sub-texture: north-up orthophoto of the bounding box of those cells (u east, v south), alpha = 3D grass length
         ci, cj = ii[m], jj[m]; xw0, xw1 = ci.min()*22.5, (ci.max()+1)*22.5; yn0, yn1 = cj.min()*22.5, (cj.max()+1)*22.5
         e0, e1, n0, n1 = plan.E0-xw1, plan.E0-xw0, plan.N0+yn0, plan.N0+yn1
-        step = 1
-        while (e1-e0)*(n1-n0)/(plan.res*step)**2 > 20e6: step *= 2              # keep the photo below ~80 MB
-        rgb, val, (e0, e1, n0, n1) = crop_ortho(plan, work, e0, e1, n0, n1, step)
+        rgb, val, (e0, e1, n0, n1) = crop_ortho(plan, work, e0, e1, n0, n1)          # at most ~80 MB
         r, g, b = (rgb[..., k].astype(np.int16) for k in range(3))
         alpha = np.zeros(rgb.shape[:2], np.uint8)
         if af.grass in ('auto', True): alpha[(g > r+6) & (g > b+10)] = 110        # blades only where the photo is green
@@ -517,12 +646,13 @@ def stage_objects(plan, cfg, work, out, name):
     import dds
     oc = cfg.get('objects', {})
     if oc is False or oc.get('enabled', True) is False: return True
-    min_h = float(oc.get('min_height', 2.5)); sink = float(oc.get('sink', 1.5))
+    min_h = float(oc.get('min_height', 2.5)); sink = float(oc.get('sink', 1.5)); min_level = int(oc.get('min_level', 0))
     ter = Terrain(plan, out); ad = f'{out}/Autogen'; os.makedirs(ad+'/Textures', exist_ok=True)
     groups = {}
-    for t in plan.tiles:                                                          # every source tile belongs to the Condor tile of its centre
-        x = plan.E0-(t['E0']+t['E1'])/2; y = (t['N0']+t['N1'])/2-plan.N0
-        groups.setdefault((int(x//TILE), int(y//TILE)), []).append(t)
+    for k, t in enumerate(plan.tiles):                                            # every source tile belongs to the Condor tile of its centre
+        if t['hidden'] >= 1 or t['level'] < min_level: continue                   # fully covered by finer tiles / too coarse for 3D objects
+        x = plan.E0-(t['e0']+t['e1'])/2; y = (t['n0']+t['n1'])/2-plan.N0
+        groups.setdefault((int(x//TILE), int(y//TILE)), []).append(k)
     for (tx, ty), src in sorted(groups.items()):
         fn = f'{ad}/o{tx:02d}{ty:02d}.c3d'
         if os.path.exists(fn) or not (0 <= tx < plan.nx and 0 <= ty < plan.ny): continue
@@ -548,10 +678,14 @@ def stage_objects(plan, cfg, work, out, name):
                                 return len(pages)-1, gx*CELL, gy*CELL, w, h
                 pages.append(np.zeros((PAGE, PAGE, 3), np.uint8)); grid = np.zeros((n, n), bool)
         nt = 0; flip_votes = 0
-        for t in src:
+        for k in src:
+            t = plan.tiles[k]; mk = plan.hole_mask(k)
             for ecef, uv, tri, im in load_glb(t['glb'], np.array(t['M'])):
                 if im is None or not len(tri): continue
                 lat, lon, h = ecef_to_lla(ecef); E, N = utm_forward(lat, lon, plan.zone, plan.south)
+                if mk is not None:                                                 # drop what finer tiles replace (by triangle centre)
+                    hu, hv = plan.hole_coords(k, lat, lon); tri = tri[~in_hole(mk, hu[tri].mean(1), hv[tri].mean(1))]
+                    if not len(tri): continue
                 x = plan.E0-E; y = N-plan.N0; z = h+plan.height_offset
                 hag = z - ter.height(x, y)
                 keep = hag[tri].max(1) > min_h
@@ -594,18 +728,26 @@ if __name__ == '__main__':
         v = opt(o)
         if v in a: a.remove(v)
     if len(a) < 3: print(__doc__); sys.exit(1)
-    export, cfgp, out = a[0], a[1], a[2].rstrip('/')
-    name = os.path.basename(out); cfg = json.load(open(cfgp)); work = opt('--work') or os.path.join(export, '_condor_work')
-    os.makedirs(work, exist_ok=True); os.makedirs(out, exist_ok=True)
+    exports, cfgp, out = a[:-2], a[-2], a[-1].rstrip('/')
+    for e in exports:
+        if not os.path.exists(os.path.join(e, 'tileset.json')): raise SystemExit(f'{e} is not an export folder (no tileset.json)')
+    name = os.path.basename(out); cfg = json.load(open(cfgp)); work = opt('--work') or os.path.join(exports[0], '_condor_work')
+    os.makedirs(work, exist_ok=True)
     BUDGET[0] = float(opt('--budget', 1e18)); only = opt('--only')
+    stages = ('plan', 'raster', 'terrain', 'textures', 'base', 'airports', 'objects')
+    if only not in (None,)+stages: raise SystemExit(f'--only must be one of: {", ".join(stages)}')
     def stop(): log('time budget used up: run the same command again to continue'); sys.exit(2)
-    plan = stage_plan(export, cfg, work)
+    fresh = not os.path.exists(f'{work}/plan.json')
+    plan = stage_plan(exports, cfg, work)
+    if only == 'plan':
+        if not fresh: report(plan, cfg, work)
+        sys.exit(0)
+    os.makedirs(out, exist_ok=True)
     if only in (None, 'raster') and not stage_raster(plan, work): stop()
     if only in (None, 'terrain', 'base'): trn = stage_terrain(plan, cfg, work, out, name)
     if out_of_time(): stop()
     if only in (None, 'textures') and not stage_textures(plan, work, out, name): stop()
     if only in (None, 'base'): stage_base(plan, cfg, work, out, name, trn)
     if only in (None, 'airports'): stage_airports(plan, cfg, work, out, name)
-    if only in (None, 'objects') and 'stage_objects' in globals():
-        if not stage_objects(plan, cfg, work, out, name): stop()
+    if only in (None, 'objects') and not stage_objects(plan, cfg, work, out, name): stop()
     log(f'done: {out}')
