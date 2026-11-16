@@ -11,3 +11,5 @@ luts_candidates/
 postfx/test/ref/
 .venv/
 __pycache__/
+rust/tiles2condor/target/
+bin/

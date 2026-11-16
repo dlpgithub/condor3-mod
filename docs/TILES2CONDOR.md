@@ -117,3 +117,30 @@ control tower stand in 3D. Game log: memory 1.6 of 4 GB (the game is a 32-bit pr
   larger exports is untested; `objects.min_height` or `"objects": false` reduce the load.
 - No water detection (texture alpha stays opaque), no thermal classes beyond green / not green, no airspace.
 - Asphalt surface objects (with tyre-mark detail) could be added for the runway given in the config.
+
+## Rust version (fast, native binary)
+
+`rust/tiles2condor/` is a port of `tools/tiles2condor.py` to Rust. Same command line, same stages, same config file, same output files.
+A compiled Mac binary (Intel, x86_64) is at `bin/tiles2condor` (not in git; rebuild it with the commands below).
+
+    bin/tiles2condor <export_dir> [<export_dir> ...] <config.json> <Landscapes_dir>/<Name> [--work DIR] [--budget S] [--only STAGE] [--threads N]
+
+Differences to the Python version:
+
+- All CPU cores are used (raster blocks, texture compression, object tiles). `--threads N` limits that.
+- The work folder defaults to `<first export_dir>/_condor_work_rs` and has its own file format. Do not point it at a Python work folder
+  (and the other way round).
+- `plan_levels.png` has only number labels (Condor tile + texture size, level numbers in the legend); airports are drawn as white lines without names.
+- The filler noise in the textures comes from a different random generator.
+
+Build (needs the Rust toolchain from https://rustup.rs, installed in `~/.cargo`):
+
+    cd rust/tiles2condor
+    ~/.cargo/bin/cargo build --release
+    cp target/release/tiles2condor ../../bin/
+
+Check against Python (21-tile + 24-tile sample around lat 48.708, lon 2.304, two detail levels, one airport): of the 23 output files 17 are
+byte-identical (among them `.trn`, `.tr3`, `.apt`, `.tm3`, the airport meshes and the object atlas textures). The others differ only by rounding:
+`.tr3f` below 1 mm (so `.tha` differs), object vertices below 0.1 mm (so `.oha` differs), map `.bmp` by 1 grey level, the tile texture by the filler
+noise (data area: 99.3 % of the pixels identical). Run time on that sample: Python 22 s, Rust 3 s. Like the reworked Python version it has
+NOT been run on a full export or looked at in the game yet.
