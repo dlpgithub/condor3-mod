@@ -25,7 +25,9 @@ import c3d, apt, utm, obj2c3d
 
 NX, NY = 6, 5
 TILE = 5760.0
-E0, N0, ZONE = 460800.0, 5184000.0, int(os.environ.get('UTMZONE', 33))   # UTM easting of the EAST edge, northing of the SOUTH edge
+SOUTH = os.environ.get('HEMI') == 'S'                 # test: southern hemisphere (UTM northing has a 10 000 km false northing there)
+E0, N0, ZONE = 460800.0, (4787200.0 if SOUTH else 5184000.0), int(os.environ.get('UTMZONE', 33))   # UTM easting of the EAST edge, northing of the SOUTH edge
+def LL(E, N): return utm.inverse(E, N - (1e7 if SOUTH else 0.0), ZONE)
 FLOOR = 500.0
 LAKE_X, LAKE_RX, LAKE_RY, LAKE_Z = 7500.0, 1600.0, 550.0, 496.0
 MW, MH = NX*192+1, NY*192+1                     # master grid of 30 m posts
@@ -48,7 +50,7 @@ class Airport:
         return dW*s.c + dN*s.s, -dW*s.s + dN*s.c
     def to_world(s, x, y): return s.AX + x*s.c - y*s.s, s.AY + x*s.s + y*s.c
     def z(s, x, y): return s.sy*np.asarray(y, np.float32) + s.sx*np.asarray(x, np.float32)      # local height of the ground plane
-    def latlon(s): return utm.inverse(E0-s.AX, N0+s.AY, ZONE)
+    def latlon(s): return LL(E0-s.AX, N0+s.AY)
 
 A1 = Airport('Talfeld', 20000.0, 900, 30, True, 300.0, 700.0, FLOOR)
 A2 = Airport('Hangfeld', 24000.0, 600, 30, False, 150.0, 450.0, 504.0, sy=0.02, sx=0.01)
@@ -437,11 +439,13 @@ def build_scenery(out, name):
     # airspace: OpenAir text; the game refuses the landscape unless <name>.aha holds the hash of this file
     lat, lon = A1.latlon()
     def dms(v, w): d_ = int(v); m = int((v-d_)*60); s_ = int(round(((v-d_)*60-m)*60)); return f'{d_:0{w}d}:{m:02d}:{min(s_, 59):02d}'
-    air = f'* {name}\r\n\r\nAC D\r\nAN TALFELD CTR\r\nAL GND\r\nAH FL 65\r\nV X={dms(lat, 2)} N {dms(lon, 3)} E\r\nDC 2\r\n'.encode()
+    ns = 'S' if lat < 0 else 'N'
+    air = f'* {name}\r\n\r\nAC D\r\nAN TALFELD CTR\r\nAL GND\r\nAH FL 65\r\nV X={dms(abs(lat), 2)} {ns} {dms(lon, 3)} E\r\nDC 2\r\n'.encode()
     open(f'{out}/{name}.air', 'wb').write(air); open(f'{out}/{name}.aha', 'wb').write(f'{condor_hash(air, 0)}\r\n'.encode())
 
 def cup_coord(lat, lon):
-    return f'{int(lat):02d}{(lat-int(lat))*60:06.3f}N,{int(lon):03d}{(lon-int(lon))*60:06.3f}E'
+    h = 'S' if lat < 0 else 'N'; lat = abs(lat)
+    return f'{int(lat):02d}{(lat-int(lat))*60:06.3f}{h},{int(lon):03d}{(lon-int(lon))*60:06.3f}E'
 
 def main(out):
     name = os.path.basename(out.rstrip('/'))
@@ -451,7 +455,7 @@ def main(out):
     trn = np.ascontiguousarray(Hi[:-1:3, :-1:3])                              # 90 m cells [x][y]
     # header: width, height, f32 cell size, f32 dx (-90: x counts west), f32 dy (+90), f32 E0, f32 N0, UTM zone, hemisphere char
     # (the game's "calibration" check only wants 80 <= |dx|, |dy| <= 100)
-    open(f'{out}/{name}.trn', 'wb').write(struct.pack('<II5fII', NX*64, NY*64, 90.0, -90.0, 90.0, E0, N0, ZONE, ord('N')) + trn.tobytes())
+    open(f'{out}/{name}.trn', 'wb').write(struct.pack('<II5fII', NX*64, NY*64, 90.0, -90.0, 90.0, E0, N0, ZONE, ord('S' if SOUTH else 'N')) + trn.tobytes())
     apt_tiles = {ap.tile for ap in AIRPORTS}
     tha, fha = [], []
     only = os.environ.get('ONLY')
@@ -488,8 +492,8 @@ def main(out):
     bgra = np.dstack([img[..., 2], img[..., 1], img[..., 0], np.full(img.shape[:2], 255, np.uint8)])
     open(f'{out}/{name}.bmp', 'wb').write(struct.pack('<2sIHHIIiiHHIIiiII', b'BM', 54+W*Hh*4, 0, 0, 54, 40, W, Hh, 1, 32, 0, W*Hh*4, 2834, 2834, 0, 0) + np.ascontiguousarray(bgra).tobytes())
     open(f'{out}/{name}.apt', 'wb').write(b''.join(build_airport(out, ap) for ap in AIRPORTS))
-    pk = np.unravel_index(int(Hm.argmax()), Hm.shape); plat, plon = utm.inverse(E0-pk[0]*30.0, N0+pk[1]*30.0, ZONE)
-    llat, llon = utm.inverse(E0-LAKE_X, N0+float(yv(LAKE_X)), ZONE)
+    pk = np.unravel_index(int(Hm.argmax()), Hm.shape); plat, plon = LL(E0-pk[0]*30.0, N0+pk[1]*30.0)
+    llat, llon = LL(E0-LAKE_X, N0+float(yv(LAKE_X)))
     cup = ['name,code,country,lat,lon,elev,style,rwdir,rwlen,freq,desc']
     for ap in AIRPORTS:
         cup.append(f'"{ap.name}",{ap.name[:8]},,{cup_coord(*ap.latlon())},{ap.h0:.1f}m,{5 if ap.asphalt else 2},{int(round(ap.heading)):03d},{ap.len}.0m,123.500,')

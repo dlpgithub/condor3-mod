@@ -259,13 +259,21 @@ float constants) was enough. The official PDFs were read completely; their claim
 ### Autogen: `Autogen/oXXYY.c3d` (+ `Autogen/Textures/`)
 - One ordinary C3D per tile (name like the height tile). Vertex coordinates: **x west / y north relative to the tile CENTRE, z = absolute altitude**
   (checked against the terrain for three stock tiles, and with our own houses). Stock content: OSM buildings, pylons; params mostly 0/0/0.
-- `<L>.oha` (MD5 per tile) is not read by the game (only the editor/validator); a tile without autogen simply has no file.
+- **`<L>.oha` is the autogen index and integrity list** (RE 0x6defe8, loaded next to .tha/.fha at 0x75ee..): a tile's autogen file is only
+  loaded when its `.oha` line carries a hash (lines `%06d` key, then the MD5 hex of `Autogen/oXXYY.c3d`; key alone = no autogen). After loading,
+  the file's MD5 is compared with the entry; a mismatch or a missing file clears the landscape's "autogen valid" flag (see penalties below).
+  (This corrects the earlier note that the game does not read `.oha`.)
 
 ### Terrain details
 - `.trn` header (36 bytes): `u32 width, u32 height, f32 90 (cell), f32 dx = -90, f32 dy = +90, f32 E0, f32 N0, u32 UTM zone, u32 'N'`.
   The "Landscape not correctly calibrated" check (0x6aee47) only requires `80 <= |dx| <= 100` and `80 <= |dy| <= 100`.
-- **The UTM zone of the header is honoured**: the same landscape written as zone 31 (airport and airspace lat/lon recomputed) shows airports and
-  airspace at the right map position and flies normally. Southern hemisphere not tested.
+- **UTM zone and hemisphere of the header are honoured**: the same landscape written as zone 31, and as southern hemisphere (`'S'`, N0 with the
+  10 000 km false northing, negative latitudes in `.apt`, `S` in `.air`/`.cup`), shows airports and airspace at the right map position and flies
+  normally; in the south the sun stands in the north.
+- **Integrity flags and their penalty** (RE 0x76a2e2, 0x76ad6e, 0x6df337, 0x6d64d7): a `.tha` or `.fha` value off by more than 1, or a bad autogen
+  MD5, clears one of three flags of the landscape. Nothing is logged or shown, but in every simulation frame with a cleared flag the game calls
+  0x6f58f0, which forces one flight-control axis of the player's aircraft to -1 (controls +0x618; skipped in some states such as on the ground),
+  i.e. the aircraft is sabotaged in flight. Which axis it is was not identified and the effect was not provoked in game: always write correct hashes.
 - Water: a terrain texel is water when the tile texture's **alpha < 0.8** (EffectLand); use DXT3 (DXT1's 1-bit alpha gives jagged shores, guide).
 - Tile textures get a tiled detail texture multiplied in (x30 per tile); `RealtimeShading=0` in the ini lights the terrain as if flat.
 - Files that define a landscape for the game's file list (0x6956bd): `.air .trn .bmp .tm3 .obj .apt .tha .fha .aha .ini`; the `.bmp` must have
@@ -283,7 +291,7 @@ float constants) was enough. The official PDFs were read completely; their claim
     drives the thermal; **otherwise flat-land mode**, where probability and strength are proportional to **byte0 (the painted thermal map)**
     together with the weather's flats activity (guide: black = no thermals; water 0, deciduous 64, forest/grass 102, fields 178).
   - during a thermal's life byte1 is sampled again (bilinear): above 0.5 the strength is scaled by `1 - 3 (v - 0.5)`.
-  - byte2 (mean slope): consumer not found.
+  - byte2 (mean slope) is copied but never read by the generator: it has no effect on thermals.
 
 ### Flight plan and test automation
 - `scripts/flytest.sh [views]` starts the game, enters the flight, pauses and visits camera positions given as ABSOLUTE world coordinates
@@ -291,8 +299,8 @@ float constants) was enough. The official PDFs were read completely; their claim
   script reads the position back before every move. Ground-level cameras stay level; after several airborne moves the glider pitches up.
 
 ### Still open
-- Southern hemisphere / very different latitudes; landscapes larger than the tested 6x5 with other tile counts are covered by stock (60x48).
-- What exactly `.tha`/`.fha` mismatches trigger (official text: treated as cheating); consumer of tm3 byte2; the red stock Asphalt seen in session 3
-  (a degenerate-UV Asphalt renders flat grey, not red).
-- Rotation angle used for the detail fit of grass-type surfaces (field +0x5c of the airport object); north-up sub-texture mapping works.
-- C3Dx obfuscation, GAU, plane-specific C3D features (animation morph targets), `Images/` (optional splash picture, not needed).
+- Which control axis the integrity penalty drives (see above); the red stock Asphalt seen in session 3 (a degenerate-UV Asphalt renders flat
+  grey, not red).
+- Rotation angle used for the detail fit of grass-type surfaces (field +0x5c of the airport object, most likely the runway direction so that the
+  fit happens in north-up axes); the north-up sub-texture mapping of the stock airports works.
+- Outside the landscape scope: C3Dx obfuscation, GAU, plane-specific C3D features (morph targets), `Images/` (optional splash picture).
