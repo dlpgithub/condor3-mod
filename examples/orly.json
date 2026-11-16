@@ -1,0 +1,54 @@
+{
+ "margin_tiles": 1,
+ "texture_size": 8192,
+ "airports": [
+  {
+   "name": "Orly-06",
+   "runway": {
+    "from": [
+     48.7196927,
+     2.3156802
+    ],
+    "to": [
+     48.7361067,
+     2.362025
+    ],
+    "width": 45,
+    "surface": "asphalt"
+   },
+   "frequency": 118.7
+  },
+  {
+   "name": "Orly-07",
+   "runway": {
+    "from": [
+     48.71957,
+     2.3584545
+    ],
+    "to": [
+     48.727659,
+     2.4039731
+    ],
+    "width": 45,
+    "surface": "asphalt"
+   },
+   "frequency": 118.7
+  },
+  {
+   "name": "Orly-02",
+   "runway": {
+    "from": [
+     48.7168979,
+     2.3764341
+    ],
+    "to": [
+     48.7392937,
+     2.3873373
+    ],
+    "width": 60,
+    "surface": "asphalt"
+   },
+   "frequency": 118.7
+  }
+ ]
+}

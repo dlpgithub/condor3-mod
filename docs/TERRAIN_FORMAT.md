@@ -275,6 +275,12 @@ ObjectEditor's grid columns are `Name, Vertex, LOD, Texture, Spec, Shiny, Env, R
   (Kapfenberg -14.0 m, Novo-Mesto +8.6 m, Aigen 0.0). `[G]`: Talfeld with `.apt` elevation 530 on terrain at 500 m sits on the ground unchanged
   (`APT_ELEV_OFFSET=30` in `make_demo.py`).
 - A coplanar ground mesh renders without z-fighting `[G]`; a mesh BELOW the terrain is hidden (-0.3 m was invisible); a mesh above floats.
+- **Triangulation of the rendered terrain** `[D]`: stock Grass3D vertices lie on the world-aligned 22.5 m post grid, and each grid cell is split
+  by an alternating diagonal: cell (i, j) (post indices, i west, j north, counted from the landscape origin) with i+j even uses the diagonal
+  (i,j)-(i+1,j+1), odd uses (i+1,j)-(i,j+1) (Aigen, Bovec, Celje: 100 % of grid triangles). A ground mesh built from the same posts and
+  diagonals is the terrain surface exactly, whatever its shape (`Terrain` class and `stage_airports` in `tools/tiles2condor.py`).
+- Pavement drawn through `Grass3D` (photo x grass detail) looks bleached and grainy `[G]` (Orly): put only grass into Grass3D and leave paved
+  areas to the terrain texture or to Asphalt objects.
 - 4 stock airports have no `.tr3f` and are simply flat in the `.tr3`. Integer `.tr3` heights cannot represent a slope exactly, so a sloped
   airport needs a `.tr3f`.
 - **Recipe**: first make the terrain under the airport the surface you want (ProofValley: an exact plane, blended into the surroundings over
@@ -419,6 +425,7 @@ airport without touching the UI. The previous plan is saved beside it as `Flight
 | file | purpose | status |
 |---|---|---|
 | `tools/make_demo.py` | builds the complete ProofValley landscape; the executable form of this document. Key functions: `build_master` (heights, airport planes), `ground`, `forest_class`, `color` (ground colour, water mask, thermal class for any world point), `dds_header`/`bc1_blocks`/`alpha_blocks`/`write_dds`, `tile_texture`, `Airport` class, `plane_mesh`, `build_airport`, `build_scenery` (world objects, `.obj`, autogen, `.oha`, `.air`/`.aha`), `main` | current |
+| `tools/tiles2condor.py`, `tools/dds.py` | landscape from a 3D Tiles export (photogrammetry): rasteriser, ground model, textures, airports from JSON, 3D objects as autogen. Manual: `docs/TILES2CONDOR.md` | current, verified with Paris Orly |
 | `tools/c3d.py` | C3D parse / write / build | current |
 | `tools/obj2c3d.py` | OBJ(+MTL) -> C3D like ObjectEditor (`--wings`, `--texdir`) | current, verified with one object |
 | `tools/apt.py` | `.apt` unpack / pack_one | current |
