@@ -8,6 +8,7 @@ add_compile_definitions(_WIN32_WINNT=0x0600 WINVER=0x0600)
 option(ENABLE_MOVE_PATCHES       "Delphi Move/FastMM patches" OFF)
 option(ENABLE_HANGAR_PREVIEW_FIX "Hangar preview fix"         ON)
 option(ENABLE_POSTFX             "Post-processing (SSAO, bloom, tone mapping)" ON)
+option(ENABLE_AGSTREAM           "Stream autogen from the 64-bit helper (c3helper.exe)" ON)
 
 # Dobby comes prebuilt (scripts/build_dobby.sh, run inside the dev container).
 set(DOBBY_PREBUILT_DIR "${CMAKE_SOURCE_DIR}/deps/dobby-prebuilt"
@@ -49,6 +50,9 @@ endif()
 if(ENABLE_POSTFX)
     list(APPEND D3DX_SOURCES src/postfx_core.c src/postfx_hook.c)
 endif()
+if(ENABLE_AGSTREAM)
+    list(APPEND D3DX_SOURCES src/agstream.c src/c3h_client.c)
+endif()
 
 add_library(d3dx_proxy SHARED ${D3DX_SOURCES})
 
@@ -60,6 +64,9 @@ if(ENABLE_HANGAR_PREVIEW_FIX)
 endif()
 if(ENABLE_POSTFX)
     target_compile_definitions(d3dx_proxy PRIVATE ENABLE_POSTFX)
+endif()
+if(ENABLE_AGSTREAM)
+    target_compile_definitions(d3dx_proxy PRIVATE ENABLE_AGSTREAM)
 endif()
 
 set_target_properties(d3dx_proxy PROPERTIES

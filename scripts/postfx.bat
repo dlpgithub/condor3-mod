@@ -13,6 +13,7 @@ rem   1. backs up the game's own d3dx.dll as d3dx.dll.before_postfx (only the fi
 rem   2. copies build\d3dx.dll (the prebuilt mod) over d3dx.dll
 rem   3. creates <game>\postfx with postfx.hlsl and the colour LUT (postfx\user\lut.cube, else the default one)
 rem   4. copies the patched shaders from shaders\build\Effects\fx into <game>\Effects\fx
+rem   5. copies build\c3helper.exe (64-bit autogen helper, from condor3-helper) next to Condor.exe, if present
 rem
 rem Needs the same Condor version the mod was made for (3.1.0): the mod patches fixed addresses in Condor.exe.
 rem Keys in the game: F9 = effect on/off, F8 = reload shader, F10 = capture frame.
@@ -64,6 +65,10 @@ if not exist "%ROOT%\shaders\build\Effects\fx" (
 )
 if not exist "%GAME%\Effects\fx" mkdir "%GAME%\Effects\fx"
 copy /y "%ROOT%\shaders\build\Effects\fx\*.fx" "%GAME%\Effects\fx\" >nul || exit /b 1
+if exist "%ROOT%\build\c3helper.exe" (
+  copy /y "%ROOT%\build\c3helper.exe" "%GAME%\c3helper.exe" >nul || exit /b 1
+  echo Autogen streaming: c3helper.exe installed ^(log %GAME%\postfx\agstream.log^)
+) else echo Note: build\c3helper.exe not found - autogen streaming stays off, the game loads autogen itself.
 echo Installed. Start Condor normally.  F9 = effect on/off, F8 = reload shader, F10 = capture frame.
 echo Log: %GAME%\postfx\postfx.log
 echo Remove again: scripts\postfx.bat uninstall "%GAME%"
@@ -79,7 +84,8 @@ if exist "%BAK%" move /y "%BAK%" "%GAME%\d3dx.dll" >nul
 if exist "%GAME%\postfx" rmdir /s /q "%GAME%\postfx"
 rem the game's own .fxc shaders are never modified; the mod only adds Effects\fx
 if exist "%GAME%\Effects\fx" rmdir /s /q "%GAME%\Effects\fx"
-echo Restored the previous d3dx.dll, removed %GAME%\postfx and %GAME%\Effects\fx
+if exist "%GAME%\c3helper.exe" del /q "%GAME%\c3helper.exe"
+echo Restored the previous d3dx.dll, removed %GAME%\postfx, %GAME%\Effects\fx and c3helper.exe
 exit /b 0
 
 :sync

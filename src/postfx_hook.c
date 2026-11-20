@@ -325,6 +325,9 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
 
     if (g_dead) return;
     g_frames++;
+#ifdef ENABLE_AGSTREAM
+    { void AgStream_FrameTick(void); AgStream_FrameTick(); }
+#endif
 
     Key(VK_F8, &kF8, &e8); Key(VK_F9, &kF9, &e9); Key(VK_F10, &kF10, &e10);
     if (e9) { g_enabled = !g_enabled; DBGLOG("postfx: %s", g_enabled ? "on" : "off"); if (g_logf) { fprintf(g_logf, "postfx: %s\n", g_enabled ? "on" : "off"); fflush(g_logf); } }
@@ -650,6 +653,39 @@ static void LogState(void) {
     (void)lastFrames;
     g_main = NULL; EnumWindows(EnumW, 1);
 }
+// vm: summary of the 32-bit address space (committed by type, reserved, free, largest free block)
+static void DoVmStat(const char* tag) {
+    MEMORY_BASIC_INFORMATION mbi; uintptr_t a = 0x10000;
+    unsigned long long img = 0, map = 0, priv = 0, res = 0, freeb = 0, big = 0;
+    while (a < 0xFFFF0000u) {
+        if (!VirtualQuery((void*)a, &mbi, sizeof mbi)) break;
+        if (mbi.State == MEM_FREE) { freeb += mbi.RegionSize; if (mbi.RegionSize > big) big = mbi.RegionSize; }
+        else if (mbi.State == MEM_RESERVE) res += mbi.RegionSize;
+        else if (mbi.Type == MEM_IMAGE) img += mbi.RegionSize;
+        else if (mbi.Type == MEM_MAPPED) map += mbi.RegionSize;
+        else priv += mbi.RegionSize;
+        if ((uintptr_t)mbi.BaseAddress + mbi.RegionSize <= a) break;
+        a = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    }
+    RLog("vm %s: frame %u commit private %llu MB, mapped %llu MB, image %llu MB, reserved %llu MB, free %llu MB (largest %llu MB)",
+         tag, g_frames, priv >> 20, map >> 20, img >> 20, res >> 20, freeb >> 20, big >> 20);
+    if (!strcmp(tag, "cmd")) {   // committed private memory by allocation (region group) size: big DXVK chunks vs heap blocks
+        static const unsigned long long lim[6] = { 1ull << 20, 4ull << 20, 16ull << 20, 64ull << 20, 256ull << 20, ~0ull };
+        unsigned long long sum[6] = {0}; unsigned cnt[6] = {0}; uintptr_t base = 0, cur = 0x10000; unsigned long long asz = 0;
+        for (;;) {
+            int k; int done = !VirtualQuery((void*)cur, &mbi, sizeof mbi) || (uintptr_t)mbi.BaseAddress + mbi.RegionSize <= cur || cur >= 0xFFFF0000u;
+            if (done || (uintptr_t)mbi.AllocationBase != base) {          // close the previous allocation
+                if (base && asz) { for (k = 0; asz > lim[k]; k++); sum[k] += asz; cnt[k]++; }
+                if (done) break;
+                base = (uintptr_t)mbi.AllocationBase; asz = 0;
+            }
+            if (mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE) asz += mbi.RegionSize;
+            cur = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        }
+        RLog("vm sizes (allocations: count/MB): <1M %u/%llu, <4M %u/%llu, <16M %u/%llu, <64M %u/%llu, <256M %u/%llu, more %u/%llu",
+             cnt[0], sum[0] >> 20, cnt[1], sum[1] >> 20, cnt[2], sum[2] >> 20, cnt[3], sum[3] >> 20, cnt[4], sum[4] >> 20, cnt[5], sum[5] >> 20);
+    }
+}
 static void DoMouseClick(int x, int y) {   // real (injected) input at client coordinates of the main window
     POINT o = {0, 0};
     if (!g_main) { RLog("mclick: no main window"); return; }
@@ -667,7 +703,10 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
     _snprintf(path, sizeof path, "%s\\cmd.txt", g_dir);
     for (;;) {
         FILE* f; char* lines[64]; int n = 0, i;
+        static unsigned tick = 0;
         Sleep(200);
+        if (++tick % 50 == 0) DoVmStat("auto");                     // every ~10 s
+
         if (g_fxHookState == 0) {                                   // Effects11 DLL was not loaded when we started: retry
             g_fxHookState = InstallFxHook();
             if (g_fxHookState != 0 && g_logf) { fprintf(g_logf, "postfx: Effects11 hook state %d (retry)\n", g_fxHookState); fflush(g_logf); }
@@ -693,6 +732,27 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
                 RLog("  sunDir %.4f %.4f %.4f  sunCol %.3f %.3f %.3f %.3f  amb %.3f %.3f %.3f %.3f", g_atmo.sun[0], g_atmo.sun[1], g_atmo.sun[2], g_atmo.sunColor[0], g_atmo.sunColor[1], g_atmo.sunColor[2], g_atmo.sunColor[3], g_atmo.amb[0], g_atmo.amb[1], g_atmo.amb[2], g_atmo.amb[3]);
             }
             else if (!_stricmp(c, "state")) LogState();
+            else if (!_stricmp(c, "vm")) DoVmStat("cmd");
+            else if (!_stricmp(c, "vmbig")) {   // every committed private allocation >= 4 MB: base, size, first bytes (who owns it?)
+                MEMORY_BASIC_INFORMATION mb; uintptr_t cur = 0x10000, base = 0, first = 0; unsigned long long asz = 0; int nb = 0;
+                for (;;) {
+                    int done = !VirtualQuery((void*)cur, &mb, sizeof mb) || (uintptr_t)mb.BaseAddress + mb.RegionSize <= cur || cur >= 0xFFFF0000u;
+                    if (done || (uintptr_t)mb.AllocationBase != base) {
+                        if (base && asz >= (4u << 20) && first && nb < 80) {
+                            const unsigned char* q = (const unsigned char*)first; char hx[100]; int o = 0, t;
+                            for (t = 0; t < 24; t++) o += _snprintf(hx + o, sizeof hx - o, "%02x", q[t]);
+                            RLog("big %p %llu KB: %s", (void*)base, asz >> 10, hx); nb++;
+                        }
+                        if (done) break;
+                        base = (uintptr_t)mb.AllocationBase; asz = 0; first = 0;
+                    }
+                    if (mb.State == MEM_COMMIT && mb.Type == MEM_PRIVATE) { asz += mb.RegionSize; if (!first && !(mb.Protect & (PAGE_GUARD | PAGE_NOACCESS))) first = (uintptr_t)mb.BaseAddress; }
+                    cur = (uintptr_t)mb.BaseAddress + mb.RegionSize;
+                }
+            }
+#ifdef ENABLE_AGSTREAM
+            else if (!_stricmp(c, "ag")) { void AgStream_Stats(void (*)(const char*, ...)); AgStream_Stats(RLog); }
+#endif
             else if (!_stricmp(c, "cam")) {     // cam off | here | X Y Z YAW PITCH
                 float v[5] = {0}; int nn;
                 if (!_stricmp(a, "off")) { g_camFree = 0; RLog("cam: engine camera"); }

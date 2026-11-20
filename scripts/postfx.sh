@@ -14,11 +14,13 @@ case "${1:-}" in
     cp "$ROOT/build/d3dx.dll" "$GAME/d3dx.dll"
     mkdir -p "$GAME/postfx"; cp "$ROOT/postfx/postfx.hlsl" "$GAME/postfx/"
     [ -f "$GAME/postfx/lut.cube" ] || cp "$ROOT/postfx/default_lut/lut.cube" "$GAME/postfx/lut.cube"
+    if [ -f "$ROOT/build/c3helper.exe" ]; then cp "$ROOT/build/c3helper.exe" "$GAME/c3helper.exe"; echo "Autogen streaming: c3helper.exe installed"
+    else echo "Note: build/c3helper.exe not found (build condor3-helper): autogen streaming stays off"; fi
     echo "Installed. Start Condor normally.  F9 = effect on/off, F8 = reload shader, F10 = capture frame."
     echo "Log: $GAME/postfx/postfx.log   Remove again: scripts/postfx.sh uninstall" ;;
   uninstall)
     [ -f "$BAK" ] && mv "$BAK" "$GAME/d3dx.dll"
-    rm -rf "$GAME/postfx"
+    rm -rf "$GAME/postfx"; rm -f "$GAME/c3helper.exe"
     echo "Restored the previous d3dx.dll, removed $GAME/postfx" ;;
   sync)
     cp "$ROOT/postfx/postfx.hlsl" "$GAME/postfx/" && echo "postfx.hlsl copied" ;;

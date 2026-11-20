@@ -21,4 +21,7 @@ void InstallPatches(void) {
 #ifdef ENABLE_POSTFX
     InstallPostFX();
 #endif
+#ifdef ENABLE_AGSTREAM
+    { void InstallAgStream(void); InstallAgStream(); }
+#endif
 }
