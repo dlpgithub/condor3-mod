@@ -26,8 +26,8 @@ then wait ~2.5 s before `shot` (the frame needs time to refresh).
 - `att` prints pitch, roll, yaw (degrees), position and speed; `att PITCH ROLL YAW` sets the attitude: yaw = compass heading of the nose,
   pitch = nose up, roll = right wing down. The velocity turns with the glider, so after `freeze off` it flies on relative to its new attitude.
   Works frozen, unfrozen and paused (applied on the next rendered frame).
-- `dump [name]` (in game: **Ctrl+Shift+D**) appends `name x y z pitch roll yaw` to `<game>/postfx/positions.txt` (default name
-  `pos_HHMMSS`). The file is a views file: `scripts/viewshots.sh <game>/postfx/positions.txt` flies back to every saved spot, sets the
+- `dump [name]` (in game: **Ctrl+Shift+D**) appends `name x y z pitch roll yaw` (glider) plus the rendered camera `x y z pitch roll yaw`
+  to `<game>/postfx/positions.txt` (default name `pos_HHMMSS`); `tools/c3view.py` uses the camera columns (docs/C3VIEW.md). The file is a views file: `scripts/viewshots.sh <game>/postfx/positions.txt` flies back to every saved spot, sets the
   attitude and takes a screenshot per line.
 - `goto NAME` jumps back to the last spot saved under that name (position + attitude, one step);
   `goto X Y Z [PITCH ROLL YAW]` goes to absolute numbers. Best used frozen: a paused game may not redraw.

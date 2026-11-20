@@ -672,8 +672,21 @@ static void DoDump(const char* name) {
     isNew = GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES;
     f = fopen(path, "a");
     if (!f) { RLog("dump: cannot write %s", path); return; }
-    if (isNew) fprintf(f, "# name  x(west)  y(north)  z(alt)  pitch  roll  yaw   (metres / degrees; usable as a views file for scripts/viewshots.sh)\n");
-    fprintf(f, "%s %.2f %.2f %.2f %.2f %.2f %.2f\n", nm, pos[0], pos[1], pos[2], p, r, y);
+    if (isNew) fprintf(f, "# name  x(west) y(north) z(alt) pitch roll yaw  [camera: x y z pitch roll yaw]   (glider, then the rendered camera;"
+                          " metres / degrees; usable as a views file for scripts/viewshots.sh)\n");
+    {   // the camera the game renders with: camera manager *(0x7D96F8) +0x148 = rows right, up, forward, position (render frame =
+        // world minus the floating origin at landscape +0x1c9 / +0x1cd, see FUN_00761014)
+        uint32_t cm = 0, L = LandscapeObj(); const float* w; float cam[16], cp, cr, cy, ox = 0, oy = 0;
+        if (Rd32((uintptr_t)IdaAddrToRuntime(0x7D96F8), &cm) && cm && !IsBadReadPtr((void*)(uintptr_t)(cm + 0x148), 64)) {
+            w = (const float*)(uintptr_t)(cm + 0x148);
+            if (L && !IsBadReadPtr((void*)(uintptr_t)(L + 0x1c9), 8)) { memcpy(&ox, (void*)(uintptr_t)(L + 0x1c9), 4); memcpy(&oy, (void*)(uintptr_t)(L + 0x1cd), 4); }
+            memset(cam, 0, sizeof cam);
+            memcpy(cam, w + 8, 12); memcpy(cam + 4, w, 12); memcpy(cam + 8, w + 4, 12);        // nose = forward, side = right, up
+            AttGet(cam, &cp, &cr, &cy);
+            fprintf(f, "%s %.2f %.2f %.2f %.2f %.2f %.2f  %.2f %.2f %.2f %.2f %.2f %.2f\n", nm, pos[0], pos[1], pos[2], p, r, y,
+                    w[12] + ox, w[13] + oy, w[14], cp, cr, cy);
+        } else fprintf(f, "%s %.2f %.2f %.2f %.2f %.2f %.2f\n", nm, pos[0], pos[1], pos[2], p, r, y);
+    }
     fclose(f);
     RLog("dump: %s %.2f %.2f %.2f %.2f %.2f %.2f -> positions.txt", nm, pos[0], pos[1], pos[2], p, r, y);
 }
