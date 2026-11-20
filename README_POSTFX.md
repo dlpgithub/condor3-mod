@@ -29,5 +29,7 @@ then wait ~2.5 s before `shot` (the frame needs time to refresh).
 - `dump [name]` (in game: **Ctrl+Shift+D**) appends `name x y z pitch roll yaw` to `<game>/postfx/positions.txt` (default name
   `pos_HHMMSS`). The file is a views file: `scripts/viewshots.sh <game>/postfx/positions.txt` flies back to every saved spot, sets the
   attitude and takes a screenshot per line.
+- `goto NAME` jumps back to the last spot saved under that name (position + attitude, one step);
+  `goto X Y Z [PITCH ROLL YAW]` goes to absolute numbers. Best used frozen: a paused game may not redraw.
 - Example (agent workflow): `freeze on`, `move 0 0 300`, `att -10 0 150`, screenshot, `move 500 0 0`, screenshot, ..., `freeze off`.
 

@@ -318,6 +318,7 @@ static int ReadProjection(PfxCamera* cam) {
 
 static void FreezeFrame(void);
 static void DoDump(const char* name);
+static void GotoApply(void); static volatile int g_gotoPending;
 static void HudPre(void* address, DobbyRegisterContext* rc) {
     static int kF8, kF9, kF10;
     int e8, e9, e10;
@@ -410,6 +411,7 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
 //   att [PITCH ROLL YAW]    print / set the glider's attitude in degrees (yaw = compass heading of the nose, pitch = nose up,
 //                           roll = right wing down); the velocity turns with the glider
 //   dump [NAME]             append "NAME x y z pitch roll yaw" to postfx\positions.txt (hotkey Ctrl+Shift+D)
+//   goto NAME | goto X Y Z [PITCH ROLL YAW]   absolute position (+ attitude); NAME = last line of that name in positions.txt
 //   move DX DY DZ           offset the glider position (metres, x west, y north, z up)
 //   wait MS                 pause the script
 #include <ctype.h>
@@ -637,6 +639,7 @@ static void FreezeFrame(void) {
         int d = (GetAsyncKeyState('D') & 0x8000) && (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000);
         if (d && !prevD) DoDump(NULL);
         prevD = d; }
+    if (g_gotoPending) GotoApply();
     if (g_attPending) {
         uint32_t o = GliderObj(); float p, r, y;
         g_attPending = 0;
@@ -673,6 +676,42 @@ static void DoDump(const char* name) {
     fprintf(f, "%s %.2f %.2f %.2f %.2f %.2f %.2f\n", nm, pos[0], pos[1], pos[2], p, r, y);
     fclose(f);
     RLog("dump: %s %.2f %.2f %.2f %.2f %.2f %.2f -> positions.txt", nm, pos[0], pos[1], pos[2], p, r, y);
+}
+
+// goto NAME | goto X Y Z [PITCH ROLL YAW]: absolute position (+ attitude). NAME = the last line with that name in positions.txt.
+// Applied on the main thread with the next rendered frame. Best used frozen (a paused game may not redraw).
+static double g_gotoPos[3]; static float g_gotoAtt[3]; static int g_gotoHasAtt; static char g_gotoName[64];
+static void DoGoto(const char* line) {
+    char nm[64] = "", path[MAX_PATH], buf[256]; double p[3]; float a[3] = {0, 0, 0}; int n;
+    n = sscanf(line, "%*s %lf %lf %lf %f %f %f", &p[0], &p[1], &p[2], &a[0], &a[1], &a[2]);
+    if (n >= 3) strcpy(nm, "(numbers)");
+    else {
+        FILE* f; int found = 0;
+        sscanf(line, "%*s %63s", nm);
+        if (!nm[0]) { RLog("goto: usage goto NAME | goto X Y Z [PITCH ROLL YAW]"); return; }
+        _snprintf(path, sizeof path, "%s\\positions.txt", g_dir);
+        f = fopen(path, "r");
+        if (!f) { RLog("goto: no %s", path); return; }
+        while (fgets(buf, sizeof buf, f)) {
+            char k[64]; double q[3]; float b[3]; int m;
+            if (buf[0] == '#') continue;
+            m = sscanf(buf, "%63s %lf %lf %lf %f %f %f", k, &q[0], &q[1], &q[2], &b[0], &b[1], &b[2]);
+            if (m >= 4 && !strcmp(k, nm)) { memcpy(p, q, sizeof p); n = m - 1; if (m >= 7) memcpy(a, b, sizeof a); found = 1; }
+        }
+        fclose(f);
+        if (!found) { RLog("goto: '%s' not in positions.txt", nm); return; }
+    }
+    memcpy(g_gotoPos, p, sizeof p); memcpy(g_gotoAtt, a, sizeof a); g_gotoHasAtt = n >= 6; strcpy(g_gotoName, nm);
+    g_gotoPending = 1;
+}
+static void GotoApply(void) {                                   // main thread
+    uint32_t o = GliderObj(); double* pos;
+    g_gotoPending = 0;
+    if (!o) { RLog("goto: no glider object"); return; }
+    pos = (double*)(uintptr_t)(o + 0x6d8);
+    pos[0] = g_gotoPos[0]; pos[1] = g_gotoPos[1]; pos[2] = g_gotoPos[2];
+    if (g_gotoHasAtt) AttApply(o, g_gotoAtt[0], g_gotoAtt[1], g_gotoAtt[2]); else DeriveFromState(o);
+    RLog("goto %s: pos %.2f %.2f %.2f%s", g_gotoName, pos[0], pos[1], pos[2], g_gotoHasAtt ? " + attitude" : "");
 }
 
 // scan X Y Z [TOL]: find three consecutive floats near X,Y,Z in the process' writable memory (to find object positions)
@@ -905,6 +944,7 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
             else if (!_stricmp(c, "freeze")) FreezeSet(!_stricmp(a, "on") ? 1 : !_stricmp(a, "off") ? 0 : !g_freeze);
             else if (!_stricmp(c, "att")) DoAtt(lines[i]);
             else if (!_stricmp(c, "dump")) DoDump(a);
+            else if (!_stricmp(c, "goto")) DoGoto(lines[i]);
             else if (!_stricmp(c, "move")) { double m[3] = {0, 0, 0}; sscanf(lines[i], "%*s %lf %lf %lf", &m[0], &m[1], &m[2]); DoMove(m[0], m[1], m[2]); }
             else if (!_stricmp(c, "poke")) { float fv = 0; sscanf(lines[i], "%*s %*s %f", &fv); DoPoke(a, fv); }
             else if (!_stricmp(c, "shot")) { CreateDirectoryA(g_dir, NULL); { char d2[MAX_PATH]; _snprintf(d2, sizeof d2, "%s\\shots", g_dir); CreateDirectoryA(d2, NULL); _snprintf(g_shot, sizeof g_shot, "%s\\%s.bin", d2, a); } RLog("shot requested: %s", g_shot); }
