@@ -316,6 +316,7 @@ static int ReadProjection(PfxCamera* cam) {
     return 1;
 }
 
+static void FreezeFrame(void);
 static void HudPre(void* address, DobbyRegisterContext* rc) {
     static int kF8, kF9, kF10;
     int e8, e9, e10;
@@ -325,6 +326,7 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
 
     if (g_dead) return;
     g_frames++;
+    FreezeFrame();                       // Ctrl+Shift+F freeze toggle, pending `att` (main thread)
 #ifdef ENABLE_AGSTREAM
     { void AgStream_FrameTick(void); AgStream_FrameTick(); }
 #endif
@@ -403,6 +405,10 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
 //   key NAME|0xVK [n]       key press (NAME: enter esc space tab up down left right f1..f12 a..z 0..9), n times
 //   keydown/keyup NAME      hold / release (e.g. for camera or controls)
 //   post on|off             post-processing on/off
+//   freeze on|off|toggle    stop / restart the glider's physics without pausing (hotkey Ctrl+Shift+F); move/att still work
+//   att [PITCH ROLL YAW]    print / set the glider's attitude in degrees (yaw = compass heading of the nose, pitch = nose up,
+//                           roll = right wing down); the velocity turns with the glider
+//   move DX DY DZ           offset the glider position (metres, x west, y north, z up)
 //   wait MS                 pause the script
 #include <ctype.h>
 static HWND g_main = NULL;
@@ -551,6 +557,97 @@ static void DoMove(double dx, double dy, double dz) {
     if (IsBadWritePtr(p, 24)) { RLog("move: bad ptr"); return; }
     p[0] += d[0]; p[1] += d[1]; p[2] += d[2];
     RLog("move: obj %08x pos now %.2f %.2f %.2f", obj, p[0], p[1], p[2]);
+}
+
+// ---- freeze + attitude ------------------------------------------------------------------------------------------
+// Avion update (0x6F921C, "Avion.Physics") calls the physics step FUN_00706988 (no arguments, uses the glider [[0x792a64]]).
+// It integrates position (doubles +0x6d8), velocity (floats +0x6f0) and the orientation matrix +0x5cc (4x4 floats, rows = nose,
+// side, up in world axes x west / y north / z up; the world frame is mirrored, so a raised row-1 tip shows as a RIGHT bank [G]), then derives +0x60c (inverse, FUN_0047FA60) and +0x6c0 (position relative to
+// the floating origin, FUN_0076107C). Frozen: we skip the step and only derive +0x60c / +0x6c0, like the game's own replay branch.
+// So the glider stays where it is while the sim keeps running (no pause), and `move` / `att` place it freely.
+#define FN_PHYSICS  0x00706988
+#define FN_MAT_INV  0x0047FA60      // EAX = dst (+0x60c), EDX = src (+0x5cc)
+#define FN_LS_POS   0x0076107C      // EAX = landscape, EDX = dst (+0x6c0), ECX = src (+0x6d8)
+#define FN_MAT_QUAT 0x004B0018      // EAX = matrix (+0x5cc), EDX = quaternion (+0x6a4)
+static volatile int g_freeze = 0;
+static void (*g_origPhysics)(void);
+static volatile int g_attPending = 0; static float g_attSet[3];      // pitch, roll, yaw (degrees), applied on the main thread
+static uint32_t DelphiCall(uintptr_t fn, uint32_t a, uint32_t d, uint32_t c) {
+    __asm__ volatile("call *%3" : "+a"(a), "+d"(d), "+c"(c) : "r"(fn) : "memory", "cc");
+    return a;
+}
+static uint32_t GliderObj(void) {
+    uint32_t pp = 0, obj = 0;
+    if (!Rd32((uintptr_t)IdaAddrToRuntime(0x792a64), &pp) || !pp || !Rd32(pp, &obj) || !obj || IsBadWritePtr((void*)(uintptr_t)(obj + 0x5cc), 0x130)) return 0;
+    return obj;
+}
+static uint32_t LandscapeObj(void) {
+    uint32_t p = 0, w = 0, l = 0;
+    if (!Rd32((uintptr_t)IdaAddrToRuntime(0x792fd0), &p) || !p || !Rd32(p, &w) || !w || !Rd32(w + 0x44, &l)) return 0;
+    return l;
+}
+static void DeriveFromState(uint32_t o) {           // what the game computes from +0x5cc / +0x6d8 after a physics step
+    uint32_t L = LandscapeObj();
+    DelphiCall((uintptr_t)IdaAddrToRuntime(FN_MAT_INV), o + 0x60c, o + 0x5cc, 0);
+    if (L) DelphiCall((uintptr_t)IdaAddrToRuntime(FN_LS_POS), L, o + 0x6c0, o + 0x6d8);
+}
+static void PhysicsHook(void) {
+    uint32_t o;
+    if (!g_freeze) { g_origPhysics(); return; }
+    o = GliderObj();
+    if (o) DeriveFromState(o);
+}
+// current attitude from the matrix rows (degrees): yaw = compass heading of the nose, pitch = nose up, roll = right wing down
+static void AttGet(const float* m, float* pitch, float* roll, float* yaw) {
+    const float *f = m, *r = m + 4; float th, ps, rl[3], ul[3];
+    th = asinf(fmaxf(-1.0f, fminf(1.0f, f[2])));
+    ps = atan2f(-f[0], f[1]);
+    rl[0] = -cosf(ps); rl[1] = -sinf(ps); rl[2] = 0;
+    ul[0] = sinf(th) * sinf(ps); ul[1] = -sinf(th) * cosf(ps); ul[2] = cosf(th);
+    *pitch = th * 57.29578f; *yaw = ps * 57.29578f; if (*yaw < 0) *yaw += 360.0f;
+    *roll = atan2f(r[0] * ul[0] + r[1] * ul[1] + r[2] * ul[2], r[0] * rl[0] + r[1] * rl[1] + r[2] * rl[2]) * 57.29578f;
+}
+static void AttApply(uint32_t o, float pitchD, float rollD, float yawD) {    // main thread
+    float* m = (float*)(uintptr_t)(o + 0x5cc); float* v = (float*)(uintptr_t)(o + 0x6f0);
+    float th = pitchD * 0.0174533f, ph = rollD * 0.0174533f, ps = yawD * 0.0174533f;
+    float f[3], rl[3], ul[3], r[3], u[3], vb[3]; int i;
+    for (i = 0; i < 3; i++) vb[i] = v[0] * m[i * 4] + v[1] * m[i * 4 + 1] + v[2] * m[i * 4 + 2];   // velocity in the old body frame
+    f[0] = -sinf(ps) * cosf(th); f[1] = cosf(ps) * cosf(th); f[2] = sinf(th);
+    rl[0] = -cosf(ps); rl[1] = -sinf(ps); rl[2] = 0;
+    ul[0] = sinf(th) * sinf(ps); ul[1] = -sinf(th) * cosf(ps); ul[2] = cosf(th);
+    for (i = 0; i < 3; i++) { r[i] = rl[i] * cosf(ph) + ul[i] * sinf(ph); u[i] = ul[i] * cosf(ph) - rl[i] * sinf(ph); }
+    for (i = 0; i < 3; i++) { m[i] = f[i]; m[4 + i] = r[i]; m[8 + i] = u[i]; v[i] = vb[0] * f[i] + vb[1] * r[i] + vb[2] * u[i]; }
+    m[3] = m[7] = m[11] = 0; m[12] = m[13] = m[14] = 0; m[15] = 1;
+    DeriveFromState(o);
+    DelphiCall((uintptr_t)IdaAddrToRuntime(FN_MAT_QUAT), o + 0x5cc, o + 0x6a4, 0);
+}
+static void FreezeSet(int on) {
+    g_freeze = on;
+    RLog("freeze: %s (physics %s)", on ? "on" : "off", on ? "stopped, glider holds its place" : "running");
+}
+// once per frame on the main thread (HUD hook): hotkey Ctrl+Shift+F, pending attitude
+static void FreezeFrame(void) {
+    static int prev;
+    int down = (GetAsyncKeyState('F') & 0x8000) && (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000);
+    if (down && !prev) FreezeSet(!g_freeze);
+    prev = down;
+    if (g_attPending) {
+        uint32_t o = GliderObj(); float p, r, y;
+        g_attPending = 0;
+        if (!o) { RLog("att: no glider object"); return; }
+        AttApply(o, g_attSet[0], g_attSet[1], g_attSet[2]);
+        AttGet((float*)(uintptr_t)(o + 0x5cc), &p, &r, &y);
+        RLog("att: set pitch %.2f roll %.2f yaw %.2f%s", p, r, y, g_freeze ? "" : " (not frozen: physics continues from here)");
+    }
+}
+static void DoAtt(const char* line) {
+    float a[3]; uint32_t o = GliderObj();
+    if (sscanf(line, "%*s %f %f %f", &a[0], &a[1], &a[2]) == 3) { memcpy(g_attSet, a, sizeof a); g_attPending = 1; return; }
+    if (!o) { RLog("att: no glider object"); return; }
+    {   float p, r, y; double* pos = (double*)(uintptr_t)(o + 0x6d8); float* v = (float*)(uintptr_t)(o + 0x6f0);
+        AttGet((float*)(uintptr_t)(o + 0x5cc), &p, &r, &y);
+        RLog("att: pitch %.2f roll %.2f yaw %.2f pos %.2f %.2f %.2f speed %.1f m/s frozen %d", p, r, y, pos[0], pos[1], pos[2],
+             sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]), g_freeze); }
 }
 
 // scan X Y Z [TOL]: find three consecutive floats near X,Y,Z in the process' writable memory (to find object positions)
@@ -780,6 +877,8 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
             else if (!_stricmp(c, "watch")) DoWatch(ResolveExpr(a), cnt > 1 ? cnt : 64);
             else if (!_stricmp(c, "unwatch")) DoUnwatch();
             else if (!_stricmp(c, "peek")) DoPeek(a, cnt > 0 && cnt != 1 ? cnt : 64);
+            else if (!_stricmp(c, "freeze")) FreezeSet(!_stricmp(a, "on") ? 1 : !_stricmp(a, "off") ? 0 : !g_freeze);
+            else if (!_stricmp(c, "att")) DoAtt(lines[i]);
             else if (!_stricmp(c, "move")) { double m[3] = {0, 0, 0}; sscanf(lines[i], "%*s %lf %lf %lf", &m[0], &m[1], &m[2]); DoMove(m[0], m[1], m[2]); }
             else if (!_stricmp(c, "poke")) { float fv = 0; sscanf(lines[i], "%*s %*s %f", &fv); DoPoke(a, fv); }
             else if (!_stricmp(c, "shot")) { CreateDirectoryA(g_dir, NULL); { char d2[MAX_PATH]; _snprintf(d2, sizeof d2, "%s\\shots", g_dir); CreateDirectoryA(d2, NULL); _snprintf(g_shot, sizeof g_shot, "%s\\%s.bin", d2, a); } RLog("shot requested: %s", g_shot); }
@@ -817,6 +916,8 @@ void InstallPostFX(void) {
     DBGLOG("postfx: hook on HUD draw (%p) -> %s (%d)", target, r == 0 ? "OK" : "FAILED", r);
     if (g_logf) { fprintf(g_logf, "postfx: hook on HUD draw %p -> %d\n", target, r); fflush(g_logf); }
     (void)r; (void)target;
+    r = DobbyHook(IdaAddrToRuntime(FN_PHYSICS), (dobby_dummy_func_t)PhysicsHook, (dobby_dummy_func_t*)&g_origPhysics);
+    if (g_logf) { fprintf(g_logf, "postfx: physics hook (freeze) -> %d\n", r); fflush(g_logf); }
     // ScenePre is not installed: instrumenting 0x73B59C crashes the game while loading a flight (see git log)
     CreateThread(NULL, 0, RemoteThread, NULL, 0, NULL);
 }
