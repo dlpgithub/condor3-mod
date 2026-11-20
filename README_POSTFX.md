@@ -26,5 +26,8 @@ then wait ~2.5 s before `shot` (the frame needs time to refresh).
 - `att` prints pitch, roll, yaw (degrees), position and speed; `att PITCH ROLL YAW` sets the attitude: yaw = compass heading of the nose,
   pitch = nose up, roll = right wing down. The velocity turns with the glider, so after `freeze off` it flies on relative to its new attitude.
   Works frozen, unfrozen and paused (applied on the next rendered frame).
+- `dump [name]` (in game: **Ctrl+Shift+D**) appends `name x y z pitch roll yaw` to `<game>/postfx/positions.txt` (default name
+  `pos_HHMMSS`). The file is a views file: `scripts/viewshots.sh <game>/postfx/positions.txt` flies back to every saved spot, sets the
+  attitude and takes a screenshot per line.
 - Example (agent workflow): `freeze on`, `move 0 0 300`, `att -10 0 150`, screenshot, `move 500 0 0`, screenshot, ..., `freeze off`.
 

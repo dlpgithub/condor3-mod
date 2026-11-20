@@ -317,6 +317,7 @@ static int ReadProjection(PfxCamera* cam) {
 }
 
 static void FreezeFrame(void);
+static void DoDump(const char* name);
 static void HudPre(void* address, DobbyRegisterContext* rc) {
     static int kF8, kF9, kF10;
     int e8, e9, e10;
@@ -408,6 +409,7 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
 //   freeze on|off|toggle    stop / restart the glider's physics without pausing (hotkey Ctrl+Shift+F); move/att still work
 //   att [PITCH ROLL YAW]    print / set the glider's attitude in degrees (yaw = compass heading of the nose, pitch = nose up,
 //                           roll = right wing down); the velocity turns with the glider
+//   dump [NAME]             append "NAME x y z pitch roll yaw" to postfx\positions.txt (hotkey Ctrl+Shift+D)
 //   move DX DY DZ           offset the glider position (metres, x west, y north, z up)
 //   wait MS                 pause the script
 #include <ctype.h>
@@ -631,6 +633,10 @@ static void FreezeFrame(void) {
     int down = (GetAsyncKeyState('F') & 0x8000) && (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000);
     if (down && !prev) FreezeSet(!g_freeze);
     prev = down;
+    {   static int prevD;
+        int d = (GetAsyncKeyState('D') & 0x8000) && (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000);
+        if (d && !prevD) DoDump(NULL);
+        prevD = d; }
     if (g_attPending) {
         uint32_t o = GliderObj(); float p, r, y;
         g_attPending = 0;
@@ -648,6 +654,25 @@ static void DoAtt(const char* line) {
         AttGet((float*)(uintptr_t)(o + 0x5cc), &p, &r, &y);
         RLog("att: pitch %.2f roll %.2f yaw %.2f pos %.2f %.2f %.2f speed %.1f m/s frozen %d", p, r, y, pos[0], pos[1], pos[2],
              sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]), g_freeze); }
+}
+
+// dump [NAME]: append "NAME x y z pitch roll yaw" to <game>\postfx\positions.txt (same columns as a views file for viewshots.sh /
+// flytest.sh, plus the attitude). Hotkey Ctrl+Shift+D. Default name: pos_HHMMSS.
+static void DoDump(const char* name) {
+    char path[MAX_PATH], nm[64]; uint32_t o = GliderObj(); FILE* f; int isNew; float p, r, y; double* pos;
+    if (!o) { RLog("dump: no glider object"); return; }
+    if (name && name[0]) { strncpy(nm, name, sizeof nm - 1); nm[sizeof nm - 1] = 0; }
+    else { SYSTEMTIME t; GetLocalTime(&t); _snprintf(nm, sizeof nm, "pos_%02d%02d%02d", t.wHour, t.wMinute, t.wSecond); }
+    pos = (double*)(uintptr_t)(o + 0x6d8);
+    AttGet((float*)(uintptr_t)(o + 0x5cc), &p, &r, &y);
+    _snprintf(path, sizeof path, "%s\\positions.txt", g_dir);
+    isNew = GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES;
+    f = fopen(path, "a");
+    if (!f) { RLog("dump: cannot write %s", path); return; }
+    if (isNew) fprintf(f, "# name  x(west)  y(north)  z(alt)  pitch  roll  yaw   (metres / degrees; usable as a views file for scripts/viewshots.sh)\n");
+    fprintf(f, "%s %.2f %.2f %.2f %.2f %.2f %.2f\n", nm, pos[0], pos[1], pos[2], p, r, y);
+    fclose(f);
+    RLog("dump: %s %.2f %.2f %.2f %.2f %.2f %.2f -> positions.txt", nm, pos[0], pos[1], pos[2], p, r, y);
 }
 
 // scan X Y Z [TOL]: find three consecutive floats near X,Y,Z in the process' writable memory (to find object positions)
@@ -879,6 +904,7 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
             else if (!_stricmp(c, "peek")) DoPeek(a, cnt > 0 && cnt != 1 ? cnt : 64);
             else if (!_stricmp(c, "freeze")) FreezeSet(!_stricmp(a, "on") ? 1 : !_stricmp(a, "off") ? 0 : !g_freeze);
             else if (!_stricmp(c, "att")) DoAtt(lines[i]);
+            else if (!_stricmp(c, "dump")) DoDump(a);
             else if (!_stricmp(c, "move")) { double m[3] = {0, 0, 0}; sscanf(lines[i], "%*s %lf %lf %lf", &m[0], &m[1], &m[2]); DoMove(m[0], m[1], m[2]); }
             else if (!_stricmp(c, "poke")) { float fv = 0; sscanf(lines[i], "%*s %*s %f", &fv); DoPoke(a, fv); }
             else if (!_stricmp(c, "shot")) { CreateDirectoryA(g_dir, NULL); { char d2[MAX_PATH]; _snprintf(d2, sizeof d2, "%s\\shots", g_dir); CreateDirectoryA(d2, NULL); _snprintf(g_shot, sizeof g_shot, "%s\\%s.bin", d2, a); } RLog("shot requested: %s", g_shot); }
