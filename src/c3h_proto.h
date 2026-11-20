@@ -52,7 +52,7 @@ typedef struct C3hLandscape {
 
 typedef struct C3hChunkInfo {
     int16_t  tile_x, tile_y;            // Condor tile (x counts west, y north)
-    uint16_t cx, cy;                    // chunk within the tile
+    uint16_t cx, cy;                    // chunk corner within the tile on the finest grid (chunks_per_tile << 4 per side; chunks vary in size)
     float    min[3], max[3];            // AABB in the tile-centred frame of the vertices (x west, y north, z = altitude)
     uint32_t bytes[C3H_MAX_LOD];        // answer size per LOD (0 = empty)
     uint32_t tris[C3H_MAX_LOD];
