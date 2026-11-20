@@ -1,0 +1,20 @@
+[package]
+name = "tiles2condor_v2"
+version = "0.2.0"
+edition = "2021"
+description = "Build a Condor 3 landscape from 3D Tiles exports: rewrite of tiles2condor with GPU raster (wgpu), per-tile out-of-core terrain and single-decode objects"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rayon = "1"
+md5 = "0.7"
+wgpu = "25"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+lz4_flex = "0.11"
+png = "0.18"
+
+[profile.release]
+opt-level = 3

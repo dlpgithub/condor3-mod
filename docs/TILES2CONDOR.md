@@ -144,3 +144,14 @@ byte-identical (among them `.trn`, `.tr3`, `.apt`, `.tm3`, the airport meshes an
 `.tr3f` below 1 mm (so `.tha` differs), object vertices below 0.1 mm (so `.oha` differs), map `.bmp` by 1 grey level, the tile texture by the filler
 noise (data area: 99.3 % of the pixels identical). Run time on that sample: Python 22 s, Rust 3 s. Like the reworked Python version it has
 NOT been run on a full export or looked at in the game yet.
+
+## Rust version 2 (GPU, per-tile, 3-4x faster)
+
+`rust/tiles2condor_v2/` is a rewrite of the Rust version: same command line (plus `--cpu`), same config, same output files; stages
+plan, scan, terrain, render, fill, base, airports (`--only` takes these names). GPU raster through wgpu (Metal / DX12 / Vulkan, CPU
+fallback), every GLB decoded once for photo and objects, terrain and fill colours computed per Condor tile, output written in the
+background. Orly export (308 tiles): 14 s -> 4 s; Orly area (2907 tiles): 69 s -> 21-25 s, work folder 1.9 GB -> 0.15 GB.
+Details, measurements and the comparison with v1: `rust/tiles2condor_v2/README.md`.
+
+    cd rust/tiles2condor_v2 && ~/.cargo/bin/cargo build --release
+    target/release/tiles2condor_v2 <export_dir> ... <config.json> <Landscapes_dir>/<Name> [--work DIR] [--budget S] [--only STAGE] [--threads N] [--cpu]
