@@ -13,3 +13,4 @@ postfx/test/ref/
 __pycache__/
 rust/tiles2condor/target/
 bin/
+docs/img/
