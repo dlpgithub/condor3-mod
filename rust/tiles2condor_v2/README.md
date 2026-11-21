@@ -44,6 +44,21 @@ Work folder default: `<first export_dir>/_condor_work_v2`. Manual for the config
   pictures of partly covered tiles stay in memory (up to 2 GB, else lz4 in the work folder). Orly-sized test: 155 MB instead of v1's 1.9 GB.
 - **Resumable** like v1: `--budget` stops between tiles (exit code 2), the next run continues (tested: identical bytes).
 
+## Distant autogen sets (for the streaming helper)
+
+When an export mixes detail levels (e.g. L17 for the surroundings, L19, L20 for landmarks), stage render also writes coarser versions
+of the 3D objects, one per lower level (not below level 17): `Autogen/oXXYY_L19.c3d`, `oXXYY_L17.c3d` with their own atlas pages
+`aXXYY_L19_NNN.dds`. Each set is "finest wins up to that level": the export's own coarser tiles (Google's simplified meshes with matching
+textures), which the full set hides, stand in for the finer ones. Where an area only has finer tiles, the coarsest of them fills in, so
+every set covers the whole area. A set is only written for a Condor tile where it differs from the full file.
+`Autogen/lods.txt` lists per tile: tile, finest level in the file, file (full detail first). The game itself still reads only
+`oXXYY.c3d` (through the `.oha`); the helper can serve the sets as far detail levels instead of its 8 m / 24 m vertex clustering.
+Every source tile is still decoded once (the hidden coarse tiles are now decoded too, for the objects only).
+Config: `"objects": { "distant_sets": false }` switches it off, `"distant_min_level": 17` is the lowest level used.
+Orly mixed export `earth-3dtiles-363f3b85` (L17 260 / L19 4483 / L20 463 tiles): full objects 8.1 M triangles (467 MB),
+L19 set 4.0 M (tile 0201 only, the other tile has no L20), L17 set 0.5 M (33 MB); from 4-12 km away the L17 set looks the same in the
+viewer.
+
 ## Numbers (this Mac: i5-7500 4 cores, RX 5700 XT, 16 GB; its disk writes only 30-120 MB/s, which limits the big case)
 
 | export | v1 | v2 |

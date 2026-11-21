@@ -152,6 +152,8 @@ plan, scan, terrain, render, fill, base, airports (`--only` takes these names). 
 fallback), every GLB decoded once for photo and objects, terrain and fill colours computed per Condor tile, output written in the
 background. Orly export (308 tiles): 14 s -> 4 s; Orly area (2907 tiles): 69 s -> 21-25 s, work folder 1.9 GB -> 0.15 GB.
 Details, measurements and the comparison with v1: `rust/tiles2condor_v2/README.md`.
+With mixed-level exports v2 also writes coarser autogen sets per level (`Autogen/oXXYY_L19.c3d`, `_L17`, list in `Autogen/lods.txt`)
+for the streaming helper's distant detail levels; `"objects": { "distant_sets": false }` switches that off.
 
     cd rust/tiles2condor_v2 && ~/.cargo/bin/cargo build --release
     target/release/tiles2condor_v2 <export_dir> ... <config.json> <Landscapes_dir>/<Name> [--work DIR] [--budget S] [--only STAGE] [--threads N] [--cpu]

@@ -53,6 +53,11 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
     if let Some(a) = PEND.lock().unwrap().as_ref().and_then(|m| m.get(path).cloned()) { return Some((*a).clone()); }
     std::fs::read(path).ok()
 }
+/// size of a file, also if it is still queued
+pub fn len(path: &str) -> Option<usize> {
+    if let Some(n) = PEND.lock().unwrap().as_ref().and_then(|m| m.get(path).map(|a| a.len())) { return Some(n); }
+    std::fs::metadata(path).ok().map(|m| m.len() as usize)
+}
 pub fn exists(path: &str) -> bool { PEND.lock().unwrap().as_ref().is_some_and(|m| m.contains_key(path)) || std::path::Path::new(path).exists() }
 
 /// CPU jobs on the rayon pool (e.g. compressing an atlas page, then writing it), at most MAX_CPU queued

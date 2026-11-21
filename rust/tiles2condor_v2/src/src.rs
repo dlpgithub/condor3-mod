@@ -187,7 +187,7 @@ pub fn load(plan: &Plan, k: usize, full: bool) -> Vec<Prim> {
     let raws = crate::prof("src.parse(cpu)", || parse(&plan.tiles[k].glb, full));
     if raws.is_empty() { return vec![]; }
     let pr = crate::prof("src.fit(cpu)", || Proj::new(plan, k, &raws));
-    let mask = plan.masks[k].is_some();
+    let mask = true;   // hole coordinates for every vertex: the distant autogen sets have their own masks
     raws.into_iter().map(|r| {
         let mut p = Vec::with_capacity(r.pos.len()); let mut hc = Vec::with_capacity(if mask { r.pos.len() } else { 0 });
         for v in &r.pos {

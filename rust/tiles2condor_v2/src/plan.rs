@@ -289,6 +289,37 @@ pub fn report(plan: &Plan, cfg: &Value, work: &str, nodup: usize) {
     match im.save(&pth) { Ok(_) => log(&format!("  map of the detail levels (north up; labels: Condor tile and texture size; legend: level): {}", pth)), Err(e) => log(&format!("  (no preview picture: {})", e)) }
 }
 
+// ------------------------------------------------------------------ distant detail sets
+impl Mask { pub fn all(&self) -> bool { self.m.iter().all(|&x| x) } }
+impl Plan {
+    /// "Finest wins" restricted to source levels <= cap (for the coarse autogen sets): a tile is hidden where a tile with a better
+    /// rank overlaps it. Up to the cap the finer tile wins; above the cap the COARSER one wins, so places that only have finer tiles
+    /// are still covered once. Per tile: None = fully visible, Some(mask) (mask.all() = not used at all).
+    pub fn masks_cap(&self, cap: i32) -> Vec<Option<Mask>> {
+        use rayon::prelude::*;
+        let rank = |l: i32| if l <= cap { 1000 + l } else { 1000 - l };
+        let t = &self.tiles;
+        (0..t.len()).into_par_iter().map(|i| {
+            let a = &t[i]; let ra = rank(a.level); let eps = 1e-9;
+            let beat: Vec<&SrcTile> = t.iter().filter(|b| rank(b.level) > ra && b.west < a.east - eps && b.east > a.west + eps && b.south < a.north - eps && b.north > a.south + eps).collect();
+            if beat.is_empty() { return None; }
+            let k = 1usize << beat.iter().map(|b| (b.level - a.level).max(0)).max().unwrap().min(6);
+            let mut m = vec![false; k * k];
+            for b in &beat {
+                for r in 0..k {
+                    let cv = a.south + (r as f64 + 0.5) / k as f64 * (a.north - a.south);
+                    if !(cv > b.south && cv < b.north) { continue; }
+                    for c in 0..k {
+                        let cu = a.west + (c as f64 + 0.5) / k as f64 * (a.east - a.west);
+                        if cu > b.west && cu < b.east { m[r * k + c] = true; }
+                    }
+                }
+            }
+            if m.iter().any(|&x| x) { Some(Mask { k, m }) } else { None }
+        }).collect()
+    }
+}
+
 // ------------------------------------------------------------------ v2 helpers
 /// Pixel frame of a Condor tile: easting of the west edge, northing of the north edge, texture size (0 = no data), metres per pixel
 pub struct Frame { pub ew: f64, pub nn: f64, pub s: usize, pub res: f64 }

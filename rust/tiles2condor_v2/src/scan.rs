@@ -35,21 +35,23 @@ pub fn batch(plan: &Plan, f: &Frame, midx: &[(u32, u32)], chunk: &[(usize, Vec<P
 
 /// load the source tiles of a Condor tile in chunks of CHUNK and hand each chunk to `f` (chunk number, tiles, prepared batch, textures).
 /// Reading, decoding and preparing (GPU upload) of the next chunk run on other threads while `f` works on the current one.
-pub fn prefetched(plan: &Plan, dev: &Dev, f: &Frame, srcs: &[usize], full: bool, mut work: impl FnMut(usize, &[(usize, Vec<Prim>)], &Prep, &[&Tex])) {
+/// Only the first `draw_n` tiles of `srcs` are drawn (the rest are loaded for the distant autogen sets only).
+pub fn prefetched(plan: &Plan, dev: &Dev, f: &Frame, srcs: &[usize], draw_n: usize, full: bool, mut work: impl FnMut(usize, &[(usize, Vec<Prim>)], &Prep, &[&Tex])) {
     let (_, midx) = plan.mask_bits();
     let midx = &midx;
     let chunks: Vec<&[usize]> = srcs.chunks(CHUNK).collect();
-    let dec = move |c: &[usize]| {
+    let dec = move |c: &[usize], start: usize| {
         let loaded: Vec<(usize, Vec<Prim>)> = c.par_iter().map(|&k| (k, src::load(plan, k, full))).collect();
-        let (b, tl) = batch(plan, f, midx, &loaded);
+        let nd = draw_n.saturating_sub(start).min(loaded.len());          // the drawn tiles come first in srcs
+        let (b, tl) = batch(plan, f, midx, &loaded[..nd]);
         let prep = { let texs: Vec<&Tex> = tl.iter().map(|&(i, j)| loaded[i].1[j].tex.as_ref().unwrap()).collect(); dev.prepare(b, &texs, full) };
         (loaded, tl, prep)
     };
     std::thread::scope(|sc| {
-        let mut next = chunks.first().map(|&c| sc.spawn(move || dec(c)));
+        let mut next = chunks.first().map(|&c| sc.spawn(move || dec(c, 0)));
         for ci in 0..chunks.len() {
             let (loaded, tl, prep) = crate::prof("decode.wait", || next.take().unwrap().join().expect("decoding failed"));
-            if ci + 1 < chunks.len() { let c = chunks[ci + 1]; next = Some(sc.spawn(move || dec(c))); }
+            if ci + 1 < chunks.len() { let c = chunks[ci + 1]; next = Some(sc.spawn(move || dec(c, (ci + 1) * CHUNK))); }
             let texs: Vec<&Tex> = tl.iter().map(|&(i, j)| loaded[i].1[j].tex.as_ref().unwrap()).collect();
             work(ci, &loaded, &prep, &texs);
         }
@@ -65,7 +67,7 @@ pub fn stage_scan(plan: &Plan, dev: &Dev, work: &str) -> bool {
         let srcs = plan.sources_of(tx, ty);
         let mut cv = dev.canvas(f.s, false);
         let mut ntri = 0usize;
-        prefetched(plan, dev, &f, &srcs, false, |_, _, prep, texs| { ntri += prep.tris(); cv.draw(prep, texs); });
+        prefetched(plan, dev, &f, &srcs, srcs.len(), false, |_, _, prep, texs| { ntri += prep.tris(); cv.draw(prep, texs); });
         let (st, cov) = cv.stats();
         let z: Vec<f32> = st.iter().map(|s| if s[0] >= NONE { f32::NAN } else { s[0] }).collect();
         crate::bg::write(zmin_path(work, tx, ty), bytemuck::cast_slice(&z).to_vec());

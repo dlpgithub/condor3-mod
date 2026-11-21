@@ -73,11 +73,14 @@ static OHA: std::sync::Mutex<BTreeMap<(usize, usize), String>> = std::sync::Mute
 const CELL: usize = 256;  // atlas cell [px]
 const PAGE: usize = 2048; // atlas page [px] (8 x 8 cells)
 
-/// objects of one Condor tile: atlas pages are written as soon as they are full (only the last page is filled, as in v1)
-struct Objects { ad: String, tx: usize, ty: usize, cur: Option<Vec<u8>>, grid: Vec<bool>, np: usize,
+/// objects of one Condor tile (one detail set: sfx "" = full detail, "_L19" = finest-wins up to level 19, ...):
+/// atlas pages are written as soon as they are full (only the last page is filled, as in v1)
+struct Objects { ad: String, sfx: String, tx: usize, ty: usize, cur: Option<Vec<u8>>, grid: Vec<bool>, np: usize,
     meshes: BTreeMap<usize, (Vec<[f32; 8]>, Vec<[u32; 3]>)>, flip: i64, nt: usize }
 impl Objects {
-    fn page_path(&self, pg: usize) -> String { format!("{}/Textures/a{:02}{:02}_{:03}.dds", self.ad, self.tx, self.ty, pg) }
+    fn new(ad: &str, sfx: String, tx: usize, ty: usize) -> Objects { Objects { ad: ad.to_string(), sfx, tx, ty, cur: None, grid: vec![], np: 0, meshes: BTreeMap::new(), flip: 0, nt: 0 } }
+    fn page_name(&self, pg: usize) -> String { format!("a{:02}{:02}{}_{:03}.dds", self.tx, self.ty, self.sfx, pg) }
+    fn page_path(&self, pg: usize) -> String { format!("{}/Textures/{}", self.ad, self.page_name(pg)) }
     /// a finished page is compressed on the idle CPU cores and written in the background (same bytes as the GPU encoder)
     fn flush(&mut self) {
         if let Some(pg) = self.cur.take() { let p = self.page_path(self.np - 1); crate::bg::cpu(move || write_dds(&p, PAGE, PAGE, false, &dxt_cpu(&pg, PAGE, PAGE, false))); }
@@ -128,31 +131,31 @@ impl Objects {
         }
         self.nt += tri.len();
     }
-    /// write oXXYY.c3d, then the file `then` (the tile's done marker, so it never lands before the objects); returns (triangles, pages, bytes)
-    fn finish(mut self, then: String) -> (usize, usize, usize) {
+    /// the C3D file of this set: (path, bytes; empty when there are no objects), triangles, atlas pages
+    fn finish(mut self) -> ((String, Vec<u8>), usize, usize) {
         self.flush();
-        let fnm = format!("{}/o{:02}{:02}.c3d", self.ad, self.tx, self.ty);
+        let fnm = format!("{}/o{:02}{:02}{}.c3d", self.ad, self.tx, self.ty, self.sfx);
         let mut objs = vec![];
         for (pg, (v, tri)) in std::mem::take(&mut self.meshes) {
             let idx: Vec<u32> = tri.iter().flat_map(|t| if self.flip > 0 { [t[2], t[1], t[0]] } else { *t }).collect();
-            objs.push(Obj { name: format!("tiles_{:03}", pg), texture: format!("Textures\\a{:02}{:02}_{:03}.dds", self.tx, self.ty, pg), color: [1.; 4], params: [0.; 3], verts: v, idx });
+            objs.push(Obj { name: format!("tiles_{:03}", pg), texture: format!("Textures\\{}", self.page_name(pg)), color: [1.; 4], params: [0.; 3], verts: v, idx });
         }
-        if objs.is_empty() { crate::bg::write(fnm, vec![]); crate::bg::write(then, vec![]); return (0, 0, 0); }
-        let d = prof("c3d.bytes", || c3d_bytes(&objs));
-        let (n, key) = (d.len(), (self.tx, self.ty));
-        crate::bg::cpu(move || { OHA.lock().unwrap().insert(key, format!("{:x}", md5::compute(&d))); crate::bg::write(fnm, d); crate::bg::write(then, vec![]); });
-        (self.nt, objs.len(), n)
+        let d = if objs.is_empty() { vec![] } else { prof("c3d.bytes", || c3d_bytes(&objs)) };
+        ((fnm, d), self.nt, objs.len())
     }
 }
 
 /// the 3D part of one source tile: triangles with a corner more than min_h above the ground, not in a hole (finer tiles replace those)
-fn object_parts<'a>(plan: &Plan, ter: &Terrain, k: usize, prims: &'a [Prim], min_h: f64, sink: f64) -> Vec<(Vec<[f64; 3]>, Vec<[f32; 2]>, Vec<[u32; 3]>, &'a Tex)> {
-    let mk = plan.masks[k].as_ref(); let mut res = vec![];
-    for pr in prims {
+/// height above the ground model of every vertex, per primitive (shared by all detail sets)
+fn heights_above(ter: &Terrain, prims: &[Prim]) -> Vec<Vec<f64>> { prims.iter().map(|pr| pr.p.iter().map(|p| p[2] - ter.height(p[0], p[1])).collect()).collect() }
+
+fn object_parts<'a>(hags: &[Vec<f64>], mk: Option<&Mask>, prims: &'a [Prim], min_h: f64, sink: f64) -> Vec<(Vec<[f64; 3]>, Vec<[f32; 2]>, Vec<[u32; 3]>, &'a Tex)> {
+    let mut res = vec![];
+    for (pi, pr) in prims.iter().enumerate() {
         let Some(tex) = pr.tex.as_ref() else { continue };
         if pr.tri.is_empty() { continue; }
         let n = pr.p.len();
-        let hag: Vec<f64> = pr.p.iter().map(|p| p[2] - ter.height(p[0], p[1])).collect();
+        let hag = &hags[pi];
         let mut used = vec![false; n]; let mut kept = vec![];
         for t3 in &pr.tri {
             let [a, b, c] = t3.map(|i| i as usize);
@@ -183,6 +186,12 @@ pub fn stage_render(plan: &Plan, cfg: &Value, dev: &Dev, work: &str, out: &str, 
     std::fs::create_dir_all(format!("{}/Textures", ad)).unwrap();
     std::fs::create_dir_all(format!("{}/Textures", out)).unwrap();
     let afs = airfields(cfg, plan);
+    // distant detail sets: one per source level below the finest (not below `distant_min_level`, default 17)
+    let mut caps: Vec<i32> = plan.tiles.iter().map(|t| t.level).filter(|&l| l >= min_level.max(cf(oc, "distant_min_level", 17.0) as i32)).collect();
+    caps.sort(); caps.dedup(); caps.pop(); caps.reverse();
+    if !objects || oc["distant_sets"].as_bool() == Some(false) { caps.clear(); }
+    let capmasks: Vec<(i32, Vec<Option<Mask>>)> = caps.iter().map(|&c| (c, plan.masks_cap(c))).collect();
+    if !caps.is_empty() { log(&format!("distant autogen sets: levels {:?} (finest wins up to that level)", caps)); }
     let mut ter: Option<Terrain> = None;
     for tx in 0..plan.nx { for ty in 0..plan.ny {
         let f = plan.frame(tx, ty);
@@ -190,18 +199,33 @@ pub fn stage_render(plan: &Plan, cfg: &Value, dev: &Dev, work: &str, out: &str, 
         if out_of_time() { return false; }
         if objects && ter.is_none() { ter = Some(Terrain::load(plan, out)); }
         let t0 = secs();
-        let srcs = plan.sources_of(tx, ty);
-        let home: Vec<bool> = srcs.iter().map(|&k| objects && plan.home_tile(k) == (tx as i64, ty as i64) && plan.tiles[k].level >= min_level).collect();
+        // ground photo: the visible tiles; objects: the tiles whose centre is here, per detail set (full = as the photo)
+        let srcs = plan.sources_of(tx, ty); let draw_n = srcs.len();
+        let homes: Vec<usize> = if objects { (0..plan.tiles.len()).filter(|&k| plan.home_tile(k) == (tx as i64, ty as i64) && plan.tiles[k].level >= min_level).collect() } else { vec![] };
+        let gone = |m: &Option<Mask>| m.as_ref().is_some_and(|m| m.all());
+        let sets: Vec<usize> = (0..capmasks.len()).filter(|&i| homes.iter().any(|&k| plan.tiles[k].hidden < 1.0 && plan.tiles[k].level > capmasks[i].0)).collect();
+        let mut list = srcs.clone();
+        { let have: std::collections::HashSet<usize> = srcs.iter().copied().collect();
+          for &k in &homes { if !have.contains(&k) && sets.iter().any(|&i| !gone(&capmasks[i].1[k])) { list.push(k); } } }
+        let is_home: std::collections::HashSet<usize> = homes.iter().copied().collect();
+        // membership per set and list position (set 0 = full detail)
+        let mut member: Vec<Vec<bool>> = vec![list.iter().map(|&k| is_home.contains(&k) && plan.tiles[k].hidden < 1.0).collect()];
+        for &i in &sets { member.push(list.iter().map(|&k| is_home.contains(&k) && !gone(&capmasks[i].1[k])).collect()); }
+        let mask_of = |s: usize, k: usize| -> Option<&Mask> { if s == 0 { plan.masks[k].as_ref() } else { capmasks[sets[s - 1]].1[k].as_ref() } };
         let mut cv = dev.canvas(f.s, true);
-        let mut ob = Objects { ad: ad.clone(), tx, ty, cur: None, grid: vec![], np: 0, meshes: BTreeMap::new(), flip: 0, nt: 0 };
+        let mut obs: Vec<Objects> = vec![Objects::new(&ad, String::new(), tx, ty)];
+        for &i in &sets { obs.push(Objects::new(&ad, format!("_L{}", capmasks[i].0), tx, ty)); }
         let mut ntri = 0usize;
         let ter_ref = ter.as_ref();
-        prefetched(plan, dev, &f, &srcs, true, |ci, loaded, prep, texs| {
+        prefetched(plan, dev, &f, &list, draw_n, true, |ci, loaded, prep, texs| {
             ntri += prep.tris();
             prof("render.draw", || cv.draw(prep, texs));
             if let Some(ter) = ter_ref {
-                let parts: Vec<_> = prof("render.objects", || loaded.par_iter().enumerate().filter(|(i, _)| home[ci * CHUNK + i]).map(|(_, (k, prims))| object_parts(plan, ter, *k, prims, min_h, sink)).collect());
-                prof("render.atlas", || for (vp, vuv, tri, tex) in parts.iter().flatten() { ob.add(vp, vuv, tri, tex); });
+                let hags: Vec<Vec<Vec<f64>>> = prof("render.heights", || loaded.par_iter().enumerate().map(|(i, (_, prims))| if member.iter().any(|m| m[ci * CHUNK + i]) { heights_above(ter, prims) } else { vec![] }).collect());
+                for (s, ob) in obs.iter_mut().enumerate() {
+                    let parts: Vec<_> = prof("render.objects", || loaded.par_iter().enumerate().filter(|(i, _)| member[s][ci * CHUNK + i]).map(|(i, (k, prims))| object_parts(&hags[i], mask_of(s, *k), prims, min_h, sink)).collect());
+                    prof("render.atlas", || for (vp, vuv, tri, tex) in parts.iter().flatten() { ob.add(vp, vuv, tri, tex); });
+                }
             }
         });
         let (st, cov) = prof("render.stats", || cv.stats());
@@ -220,9 +244,22 @@ pub fn stage_render(plan: &Plan, cfg: &Value, dev: &Dev, work: &str, out: &str, 
             let (x0, y0, w, h) = (c0 as usize, r0 as usize, (c1 - c0) as usize, (r1 - r0) as usize);
             prof("render.crops", || Crop { x0, y0, w, h, d: cv.crop(x0, y0, w, h) }.save(&crop_path(work, ai, tx, ty)));
         }
-        let (nt, np, nb) = prof("render.c3d", || ob.finish(done_path(work, tx, ty)));
-        log(&format!("render tile {:02}{:02} ({} px): {} source tiles, {:.1} M triangles, coverage {:.1}%{}; objects {} triangles, {} atlas pages, {:.0} MB  ({:.1}s)",
-            tx, ty, f.s, srcs.len(), ntri as f64 / 1e6, cov as f64 * 100.0 / (f.s * f.s) as f64, if full { ", texture written" } else { "" }, nt, np, nb as f64 / 1e6, secs() - t0));
+        // object files of all sets, then the done marker, in one background job (so the marker never lands before them)
+        let mut files = vec![]; let mut stat = String::new(); let (mut nt, mut np, mut nb) = (0, 0, 0);
+        for (s, ob) in obs.into_iter().enumerate() {
+            let sfx = ob.sfx.clone();
+            let (file, t, p) = prof("render.c3d", || ob.finish());
+            if s == 0 { nt = t; np = p; nb = file.1.len(); files.push(file); }
+            else { stat.push_str(&format!(", {} {:.2} M", &sfx[1..], t as f64 / 1e6)); if !file.1.is_empty() { files.push(file); } }
+        }
+        { let marker = done_path(work, tx, ty); let key = (tx, ty);
+          crate::bg::cpu(move || {
+              for (i, (p, d)) in files.into_iter().enumerate() { if i == 0 && !d.is_empty() { OHA.lock().unwrap().insert(key, format!("{:x}", md5::compute(&d))); } crate::bg::write(p, d); }
+              crate::bg::write(marker, vec![]);
+          }); }
+        log(&format!("render tile {:02}{:02} ({} px): {} source tiles, {:.1} M triangles, coverage {:.1}%{}; objects {} triangles, {} atlas pages, {:.0} MB{}  ({:.1}s)",
+            tx, ty, f.s, draw_n, ntri as f64 / 1e6, cov as f64 * 100.0 / (f.s * f.s) as f64, if full { ", texture written" } else { "" }, nt, np, nb as f64 / 1e6,
+            if stat.is_empty() { String::new() } else { format!("; distant sets{}", stat) }, secs() - t0));
     } }
     // .oha: MD5 of every object file (computed in the background; files from an earlier run are read)
     crate::bg::wait_cpu();
@@ -234,5 +271,20 @@ pub fn stage_render(plan: &Plan, cfg: &Value, dev: &Dev, work: &str, out: &str, 
         match h { Some(h) => oha.push_str(&format!("{} {}\r\n", key, h)), None => oha.push_str(&format!("{}\r\n", key)) }
     } }
     std::fs::write(format!("{}/{}.oha", out, name), oha).unwrap();
+    // list of the detail sets for the streaming helper (the game itself only reads oXXYY.c3d through the .oha)
+    if !caps.is_empty() {
+        let mut l = String::from("# autogen detail sets per Condor tile, finest first: tile level file   (level = finest source level in the file;\r\n# o*_L<level>.c3d = finest wins up to that level, coarser tiles from the export instead of the hidden finer ones)\r\n");
+        for tx in 0..plan.nx { for ty in 0..plan.ny {
+            let full = format!("o{:02}{:02}.c3d", tx, ty);
+            if crate::bg::len(&format!("{}/{}", ad, full)).unwrap_or(0) == 0 { continue; }
+            let lv = (0..plan.tiles.len()).filter(|&k| plan.tiles[k].hidden < 1.0 && plan.home_tile(k) == (tx as i64, ty as i64)).map(|k| plan.tiles[k].level).max().unwrap_or(0);
+            l.push_str(&format!("{:02}{:02} {} {}\r\n", tx, ty, lv, full));
+            for &c in &caps {
+                let fnm = format!("o{:02}{:02}_L{}.c3d", tx, ty, c);
+                if crate::bg::len(&format!("{}/{}", ad, fnm)).unwrap_or(0) > 0 { l.push_str(&format!("{:02}{:02} {} {}\r\n", tx, ty, c, fnm)); }
+            }
+        } }
+        std::fs::write(format!("{}/lods.txt", ad), l).unwrap();
+    }
     true
 }
