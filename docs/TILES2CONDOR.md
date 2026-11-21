@@ -133,10 +133,11 @@ Differences to the Python version:
 - `plan_levels.png` has only number labels (Condor tile + texture size, level numbers in the legend); airports are drawn as white lines without names.
 - The filler noise in the textures comes from a different random generator.
 
-Build (needs the Rust toolchain from https://rustup.rs, installed in `~/.cargo`):
+Build (needs the Rust toolchain from https://rustup.rs): `scripts/build_rust.sh` (macOS, Linux) or `scripts\build_rust.bat` (Windows)
+build both compilers into `bin/` (`v1` / `v2` for one of them, `debug` as second argument for a debug build). By hand:
 
     cd rust/tiles2condor
-    ~/.cargo/bin/cargo build --release
+    cargo build --release
     cp target/release/tiles2condor ../../bin/
 
 Check against Python (21-tile + 24-tile sample around lat 48.708, lon 2.304, two detail levels, one airport): of the 23 output files 17 are
@@ -155,5 +156,5 @@ Details, measurements and the comparison with v1: `rust/tiles2condor_v2/README.m
 With mixed-level exports v2 also writes coarser autogen sets per level (`Autogen/oXXYY_L19.c3d`, `_L17`, list in `Autogen/lods.txt`)
 for the streaming helper's distant detail levels; `"objects": { "distant_sets": false }` switches that off.
 
-    cd rust/tiles2condor_v2 && ~/.cargo/bin/cargo build --release
-    target/release/tiles2condor_v2 <export_dir> ... <config.json> <Landscapes_dir>/<Name> [--work DIR] [--budget S] [--only STAGE] [--threads N] [--cpu]
+    scripts/build_rust.sh v2           # or scripts\build_rust.bat v2 on Windows; = cd rust/tiles2condor_v2 && cargo build --release
+    bin/tiles2condor_v2 <export_dir> ... <config.json> <Landscapes_dir>/<Name> [--work DIR] [--budget S] [--only STAGE] [--threads N] [--cpu]

@@ -3,7 +3,8 @@
 Rewrite of `rust/tiles2condor` (v1). Same command line, same config file, same output files (a complete Condor 3 landscape from
 3D Tiles exports). Faster, and its memory and work folder no longer grow with the size of the landscape. v1 is left unchanged.
 
-    cd rust/tiles2condor_v2 && ~/.cargo/bin/cargo build --release
+    scripts/build_rust.sh v2          # from the repo root (Windows: scripts\build_rust.bat v2) -> bin/tiles2condor_v2
+    cd rust/tiles2condor_v2 && cargo build --release   # the same by hand
     target/release/tiles2condor_v2 <export_dir> [<export_dir> ...] <config.json> <Landscapes_dir>/<Name> [--work DIR] [--budget S] [--only STAGE] [--threads N] [--cpu]
     target/release/tiles2condor_v2 --selftest     # GPU vs CPU texture encoder: identical bytes? + timings
 
