@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #define C3H_MAGIC        0x48334343u     /* 'CC3H' */
-#define C3H_VERSION      1u
+#define C3H_VERSION      2u
 #define C3H_HEADER_SIZE  4096u
 #define C3H_ARENA_SIZE   (48u << 20)     /* answer buffer; also limits the size of one chunk / texture */
 
@@ -38,7 +38,7 @@ typedef struct C3hHeader {
     char     resp_msg[512];
 } C3hHeader;
 
-#define C3H_MAX_LOD 3
+#define C3H_MAX_LOD 4
 
 typedef struct C3hLandscape {
     uint32_t tiles_x, tiles_y;          // landscape size in tiles (from the .trn header)
@@ -47,7 +47,7 @@ typedef struct C3hLandscape {
     uint32_t n_chunks;                  // C3hChunkInfo entries that follow
     uint32_t n_textures;
     uint32_t n_lods;                    // LOD levels available for every chunk (0 = full detail)
-    float    lod_cell[C3H_MAX_LOD];     // vertex clustering cell size per LOD (0 for LOD 0)
+    float    lod_cell[C3H_MAX_LOD];     // typical vertex clustering cell per LOD (0 = a detail set); per chunk: C3hChunkInfo.err
 } C3hLandscape;
 
 typedef struct C3hChunkInfo {
@@ -56,6 +56,7 @@ typedef struct C3hChunkInfo {
     float    min[3], max[3];            // AABB in the tile-centred frame of the vertices (x west, y north, z = altitude)
     uint32_t bytes[C3H_MAX_LOD];        // answer size per LOD (0 = empty)
     uint32_t tris[C3H_MAX_LOD];
+    float    err[C3H_MAX_LOD];          // geometric error per LOD in metres (detail sets: from the source level; clustering: cell / 2)
 } C3hChunkInfo;
 
 typedef struct C3hChunk {

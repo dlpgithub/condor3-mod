@@ -871,6 +871,7 @@ static void DoMouseClick(int x, int y) {   // real (injected) input at client co
     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
     RLog("mouse click at screen %ld,%ld", o.x + x, o.y + y);
 }
+static volatile int g_vmAuto;
 static DWORD WINAPI RemoteThread(LPVOID unused) {
     char path[MAX_PATH], line[256];
     (void)unused;
@@ -879,7 +880,8 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
         FILE* f; char* lines[64]; int n = 0, i;
         static unsigned tick = 0;
         Sleep(200);
-        if (++tick % 50 == 0) DoVmStat("auto");                     // every ~10 s
+        if (g_vmAuto && ++tick % 50 == 0) DoVmStat("auto");         // every ~10 s, only when switched on (`vm auto on`): walking the
+                                                                    // address space takes Wine's memory lock
 
         if (g_fxHookState == 0) {                                   // Effects11 DLL was not loaded when we started: retry
             g_fxHookState = InstallFxHook();
@@ -906,7 +908,7 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
                 RLog("  sunDir %.4f %.4f %.4f  sunCol %.3f %.3f %.3f %.3f  amb %.3f %.3f %.3f %.3f", g_atmo.sun[0], g_atmo.sun[1], g_atmo.sun[2], g_atmo.sunColor[0], g_atmo.sunColor[1], g_atmo.sunColor[2], g_atmo.sunColor[3], g_atmo.amb[0], g_atmo.amb[1], g_atmo.amb[2], g_atmo.amb[3]);
             }
             else if (!_stricmp(c, "state")) LogState();
-            else if (!_stricmp(c, "vm")) DoVmStat("cmd");
+            else if (!_stricmp(c, "vm")) { if (!_stricmp(a, "auto")) { g_vmAuto = cnt != 0; RLog("vm auto %s", g_vmAuto ? "on" : "off"); } else DoVmStat("cmd"); }
             else if (!_stricmp(c, "vmbig")) {   // every committed private allocation >= 4 MB: base, size, first bytes (who owns it?)
                 MEMORY_BASIC_INFORMATION mb; uintptr_t cur = 0x10000, base = 0, first = 0; unsigned long long asz = 0; int nb = 0;
                 for (;;) {
