@@ -8,6 +8,12 @@ D3D11 frame just before the HUD. No texture changes. Depth is captured before th
     scripts/postfx.sh install      # backs up d3dx.dll, installs mod + postfx/postfx.hlsl
     scripts/postfx.sh uninstall
 
+## Release package
+    scripts/build_docker.sh && python3 shaders/build_shaders.py build && scripts/build_rust.sh v2   # (Windows: scripts\build_rust.bat v2)
+    scripts/package_release.sh      # -> dist/condor3-mod-<date>-<commit>-<platform>.zip (macOS / Linux / WSL)
+The zip holds the mod, the helper, shaders, install scripts, the landscape compiler and `README_RELEASE.md` as its README (usage
+of every file, for players and landscape builders).
+
 In game: F9 effect on/off, F8 reload shader, F10 capture frame. Tweak values at the top of `postfx/postfx.hlsl`
 (`scripts/postfx.sh sync` copies it; F8 hot-reloads). Overhead measured at ~1 fps (69 vs 68) on RX 5700 XT / CrossOver.
 

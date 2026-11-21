@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Installs / removes the post-processing build in the Condor 3 folder.
-#   scripts/postfx.sh install     backs up the current d3dx.dll, installs build/d3dx.dll + postfx/postfx.hlsl
-#   scripts/postfx.sh uninstall   restores the backed-up d3dx.dll and removes <game>/postfx
+#   scripts/postfx.sh install     backs up the current d3dx.dll, installs build/d3dx.dll, postfx/postfx.hlsl + colour LUT,
+#                                 the patched shaders (shaders/build/Effects/fx -> <game>/Effects/fx) and build/c3helper.exe
+#   scripts/postfx.sh uninstall   restores the backed-up d3dx.dll and removes <game>/postfx, <game>/Effects/fx, c3helper.exe
 #   scripts/postfx.sh sync        copies only postfx.hlsl (the running game hot-reloads it)
+# Game folder (the one with Condor.exe): second argument, else $CONDOR_DIR, else ~/Condor3.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-GAME="${CONDOR_DIR:-$HOME/Condor3}"
+GAME="${2:-${CONDOR_DIR:-$HOME/Condor3}}"
+case "${1:-}" in install|uninstall|sync) [ -f "$GAME/Condor.exe" ] || { echo "$GAME does not contain Condor.exe: $0 ${1} /path/to/Condor3"; exit 1; } ;; esac
 BAK="$GAME/d3dx.dll.before_postfx"
 case "${1:-}" in
   install)
@@ -13,16 +16,22 @@ case "${1:-}" in
     [ -f "$BAK" ] || cp "$GAME/d3dx.dll" "$BAK"
     cp "$ROOT/build/d3dx.dll" "$GAME/d3dx.dll"
     mkdir -p "$GAME/postfx"; cp "$ROOT/postfx/postfx.hlsl" "$GAME/postfx/"
-    [ -f "$GAME/postfx/lut.cube" ] || cp "$ROOT/postfx/default_lut/lut.cube" "$GAME/postfx/lut.cube"
+    if [ ! -f "$GAME/postfx/lut.cube" ]; then
+      if [ -f "$ROOT/postfx/user/lut.cube" ]; then cp "$ROOT/postfx/user/lut.cube" "$GAME/postfx/lut.cube"; else cp "$ROOT/postfx/default_lut/lut.cube" "$GAME/postfx/lut.cube"; fi
+    fi
+    [ -f "$ROOT/postfx/user/tune.txt" ] && [ ! -f "$GAME/postfx/tune.txt" ] && cp "$ROOT/postfx/user/tune.txt" "$GAME/postfx/tune.txt"
+    if ls "$ROOT"/shaders/build/Effects/fx/*.fx >/dev/null 2>&1; then
+      mkdir -p "$GAME/Effects/fx"; cp "$ROOT"/shaders/build/Effects/fx/*.fx "$GAME/Effects/fx/"; echo "Shaders: Effects/fx installed"
+    else echo "Note: shaders/build/Effects/fx not found (python3 shaders/build_shaders.py build): the game's own shaders stay"; fi
     if [ -f "$ROOT/build/c3helper.exe" ]; then cp "$ROOT/build/c3helper.exe" "$GAME/c3helper.exe"; echo "Autogen streaming: c3helper.exe installed"
     else echo "Note: build/c3helper.exe not found (scripts/build_docker.sh builds it from external/condor3-helper): autogen streaming stays off"; fi
     echo "Installed. Start Condor normally.  F9 = effect on/off, F8 = reload shader, F10 = capture frame."
     echo "Log: $GAME/postfx/postfx.log   Remove again: scripts/postfx.sh uninstall" ;;
   uninstall)
     [ -f "$BAK" ] && mv "$BAK" "$GAME/d3dx.dll"
-    rm -rf "$GAME/postfx"; rm -f "$GAME/c3helper.exe"
-    echo "Restored the previous d3dx.dll, removed $GAME/postfx" ;;
+    rm -rf "$GAME/postfx" "$GAME/Effects/fx"; rm -f "$GAME/c3helper.exe"
+    echo "Restored the previous d3dx.dll, removed $GAME/postfx, $GAME/Effects/fx and c3helper.exe" ;;
   sync)
     cp "$ROOT/postfx/postfx.hlsl" "$GAME/postfx/" && echo "postfx.hlsl copied" ;;
-  *) echo "usage: $0 install|uninstall|sync"; exit 2 ;;
+  *) echo "usage: $0 install|uninstall|sync [/path/to/Condor3]"; exit 2 ;;
 esac
