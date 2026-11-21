@@ -6,8 +6,11 @@ current landscape from the 64-bit helper `c3helper.exe` (separate repo `../condo
 - The game normally holds every autogen tile of a 4 x 4 tile window as one model, mesh kept twice (CPU + GPU): 2.3 GB in flight for
   OrlyDemo, crash for a 3x denser copy. With streaming: 0.9 GB / 1.3 GB, same look.
 - Chunks of 1.44 km (dense ones split down to 90 m), 4 levels of detail per chunk (the landscape's detail sets from `Autogen/lods.txt`,
-  else vertex clustering), chosen by screen-space error from the camera (`tol` 2 px, `range` 15 km in agstream.txt). Textures and GPU
-  buffers pooled, uploads through our own staging resources.
+  else vertex clustering), chosen by distance from the camera: L19 to 3 km, the tile's coarsest real level (L17) out to the 15 km
+  range, generated "blobs" only where nothing real exists. All of it in `<game>/postfx/agstream.txt` (written with comments on the
+  first start, reloaded while the game runs). Textures and GPU buffers pooled, uploads through our own staging resources.
+- CPU copies of full-detail chunks (needed for the collision test) only within 1 km of the glider; a chunk that comes closer later is
+  loaded again with its copy. Paris (OrlyParisDemoV2, L19 to 3.5 km): 1.4 GB address space instead of 2.85 GB.
 - Stutters: the CPU side of a chunk model (game objects, arrays, bounds) is built on the stream thread like the game's own cache thread
   does, the collision trees only for LOD 0 chunks within 500 m of the glider (also on the stream thread), and models are destroyed
   there too. The main thread (`AgStream_FrameTick`, HUD hook) only uploads textures and 4 MB buffer pieces and hooks models into the

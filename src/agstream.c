@@ -98,7 +98,8 @@ static double g_pf[T_N]; static unsigned g_pJobs, g_pTex, g_pFree, g_pBytes;    
 static unsigned g_slow[4], g_slowOurs[4], g_frameN; static double g_frameMax, g_lastTick;
 static volatile LONG g_stNow;              // what it does right now (same bits)
 static volatile LONG g_stMask;             // what the stream thread did since the last tick: 1 io, 2 model build, 4 trees, 8 VirtualAlloc
-static double g_ppTotal;                   // streaming time two ticks back
+static double g_ppTotal;
+static unsigned g_winFrames; static double g_winMs, g_fps;   // frames per second over ~3 s windows                   // streaming time two ticks back
 static double Now(void) { static LARGE_INTEGER f; LARGE_INTEGER c; if (!f.QuadPart) QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c); return (double)c.QuadPart * 1000.0 / (double)f.QuadPart; }
 #define TSTART double _t0 = Now()
 #define TADD(k) do { double _t1 = Now(); g_tf[k] += _t1 - _t0; _t0 = _t1; } while (0)
@@ -107,20 +108,35 @@ static double Now(void) { static LARGE_INTEGER f; LARGE_INTEGER c; if (!f.QuadPa
 static int   g_enable = 1;
 static float g_r[C3H_MAX_LOD] = { 2000.0f, 5000.0f, 12000.0f };   // LOD n is used up to distance g_r[n] (metres, 2D, to the chunk box)
 static int   g_jobsPerTick = 1;                                   // (unused since the time budget)
-static int   g_lodMode = 1;                                      // 1 = screen-space error from the camera, 0 = fixed ranges g_r
-static float g_tolPx = 2.0f;                                     // screen-space error tolerance (pixels)
+static int   g_lodMode = 2;                                      // 2 = distance per level (below), 1 = screen-space error, 0 = fixed ranges g_r
+static float g_tolPx = 2.0f;                                     // mode 1: screen-space error tolerance (pixels)
 static float g_range = 15000.0f;                                 // no autogen beyond (metres, 3D from the camera)
 static float g_budgetMs = 3.0f;                                  // main-thread streaming work per frame (ms; at least one step)
 static int   g_noGpu = 0;                                        // test switch: build models but create no GPU objects, draw nothing
+static float g_levelDist[32];                                    // mode 2: export level n used up to this distance (0 = derived)
+static float g_blobs = 15000.0f;                                 // mode 2: generated levels only beyond this (tiles with a coarse real level)
+static float g_full = 2000.0f, g_blob1 = 5000.0f, g_blob2 = 12000.0f;   // mode 2, landscapes without detail sets
+static int   g_cfgMarker;                                        // the file is our documented template
+static FILETIME g_cfgTime;
+#define CFG_MARKER "# agstream.txt v2"
+static void ConfigPath(char* p, size_t n) { _snprintf(p, n, "%s\\postfx\\agstream.txt", g_gameDir); }
 static void LoadConfig(void) {
-    char p[MAX_PATH], line[128]; FILE* f;
-    _snprintf(p, sizeof p, "%s\\postfx\\agstream.txt", g_gameDir);
+    char p[MAX_PATH], line[256]; FILE* f; WIN32_FILE_ATTRIBUTE_DATA fa;
+    ConfigPath(p, sizeof p);
+    if (GetFileAttributesExA(p, GetFileExInfoStandard, &fa)) g_cfgTime = fa.ftLastWriteTime;
     f = fopen(p, "r");
+    g_cfgMarker = 0;
     if (!f) return;
     while (fgets(line, sizeof line, f)) {
         char k[32]; float v;
-        if (sscanf(line, "%31s %f", k, &v) != 2) continue;
+        if (!strncmp(line, CFG_MARKER, strlen(CFG_MARKER))) g_cfgMarker = 1;
+        if (line[0] == '#' || sscanf(line, "%31s %f", k, &v) != 2) continue;
         if (!_stricmp(k, "enable")) g_enable = (int)v;
+        else if ((k[0] == 'L' || k[0] == 'l') && k[1] >= '0' && k[1] <= '9' && atoi(k + 1) < 32) g_levelDist[atoi(k + 1)] = v;
+        else if (!_stricmp(k, "blobs")) g_blobs = v;
+        else if (!_stricmp(k, "full")) g_full = v;
+        else if (!_stricmp(k, "blob1")) g_blob1 = v;
+        else if (!_stricmp(k, "blob2")) g_blob2 = v;
         else if (!_stricmp(k, "r0")) g_r[0] = v; else if (!_stricmp(k, "r1")) g_r[1] = v; else if (!_stricmp(k, "r2")) g_r[2] = v;
         else if (!_stricmp(k, "jobs")) g_jobsPerTick = (int)v;
         else if (!_stricmp(k, "nogpu")) g_noGpu = (int)v;
@@ -131,12 +147,53 @@ static void LoadConfig(void) {
     }
     fclose(f);
 }
+// export level n: its distance from the file, else twice the distance of level n + 1 (L19 3000 -> L18 6000, L17 12000; L20 1500)
+static float LevelDist(int n) {
+    float base = g_levelDist[19] > 0 ? g_levelDist[19] : 3000.0f;
+    if (n < 1 || n > 30) return base;
+    if (g_levelDist[n] > 0) return g_levelDist[n];
+    return n <= 19 ? base * (float)(1u << (19 - n)) : base / (float)(1u << (n - 19 > 8 ? 8 : n - 19));
+}
+// writes the documented settings file (with the values in use) when the file is not our template yet
+static void WriteConfigTemplate(void) {
+    char p[MAX_PATH]; FILE* f; int n;
+    ConfigPath(p, sizeof p);
+    f = fopen(p, "w");
+    if (!f) return;
+    fprintf(f, CFG_MARKER " - autogen streaming (c3helper.exe + d3dx.dll). One \"key value\" per line, # starts a comment.\n"
+               "# Changes are used while the game runs (within a second), except 'enable'. Delete the file to get the defaults back.\n\n"
+               "enable %d          # 0 = the game loads autogen itself (restart needed)\n\n", g_enable);
+    fprintf(f, "# Which detail is shown where. Distances in metres from the camera to the nearest point of a chunk (altitude counts).\n"
+               "range %.0f       # no autogen beyond this distance\n", g_range);
+    for (n = 20; n >= 17; n--)
+        fprintf(f, "L%d %.0f%s\n", n, LevelDist(n), n == 20 ? "         # data of export level 20 up to this distance (when the tile has a coarser level too)"
+                                                  : n == 17 ? "         # a tile's coarsest real level stays until 'blobs' anyway" : "");
+    fprintf(f, "blobs %.0f       # generated simplified versions only beyond this distance (where a real coarser level exists)\n\n", g_blobs);
+    fprintf(f, "# Landscapes without detail sets (old compiler, no Autogen/lods.txt): full detail, then generated 8 m / 24 m / 72 m versions\n"
+               "full %.0f\nblob1 %.0f\nblob2 %.0f\n\n", g_full, g_blob1, g_blob2);
+    fprintf(f, "# Other\n"
+               "budget %.1f        # milliseconds of streaming work per frame on the render thread (textures, 4 MB buffer pieces)\n"
+               "lodmode %d         # 2 = distances above, 1 = screen-space error ('tol' pixels), 0 = old fixed ranges r0 r1 r2\n"
+               "tol %.1f\n", g_budgetMs, g_lodMode, g_tolPx);
+    fclose(f);
+    LoadConfig();
+}
+static void ConfigCheck(void) {                                  // stream thread, about once a second: reload when the file changed
+    char p[MAX_PATH]; WIN32_FILE_ATTRIBUTE_DATA fa;
+    ConfigPath(p, sizeof p);
+    if (!GetFileAttributesExA(p, GetFileExInfoStandard, &fa) || !CompareFileTime(&fa.ftLastWriteTime, &g_cfgTime)) return;
+    Sleep(100);                                                  // let the editor finish writing
+    LoadConfig();
+    ALog("agstream.txt reloaded: lodmode %d, range %.0f, L20 %.0f L19 %.0f L18 %.0f L17 %.0f, blobs %.0f, full %.0f blob1 %.0f blob2 %.0f, budget %.1f",
+         g_lodMode, g_range, LevelDist(20), LevelDist(19), LevelDist(18), LevelDist(17), g_blobs, g_full, g_blob1, g_blob2, g_budgetMs);
+}
 
 // ---- state ---------------------------------------------------------------------------------------------------
 typedef struct { uint32_t key; uint8_t* dds; uint32_t size; } JobTex;
 typedef struct Job {
     struct Job* next; int chunk, lod; uint8_t* blob; uint32_t size; int ntex; JobTex tex[32];
     uint32_t model;                        // game model built by the stream thread (no GPU objects yet)
+    int arr;                               // LOD 0 near the glider: keeps its CPU arrays (collision trees need them)
     int stage, texStep; uint32_t vbOff, ibOff; struct ID3D11Buffer* vb; struct ID3D11Buffer* ib;   // main-thread progress
 } Job;
 typedef struct { ID3D11ShaderResourceView* srv; ID3D11Texture2D* tex; int users; unsigned lastUse; } TexEntry;
@@ -152,6 +209,7 @@ static Job*          g_cur;              // main thread: job being staged
 static volatile int* g_want;             // stream thread: desired LOD (-1 none)
 static volatile int* g_res;              // main thread: resident LOD (-1 none)
 static volatile int* g_pend;             // LOD of the queued job (-1 none)
+static volatile uint8_t* g_needArr;      // main thread: LOD 0 chunk came near the glider without CPU arrays: load it again with them
 static uint32_t*     g_model;            // main thread: game model per chunk
 static TexEntry*     g_tex;              // [n_textures * n_lods], main thread
 static volatile uint8_t* g_texHave;      // 1 = created (main thread), read by the stream thread
@@ -445,7 +503,7 @@ static uint32_t BuildModelCpu(const Job* j) {
     pos[0] = ((float)h->tile_x + 0.5f) * 64.0f * cell; pos[1] = ((float)h->tile_y + 0.5f) * 64.0f * cell; pos[2] = 0;
     memcpy((void*)(uintptr_t)(m + 0xf4), pos, 12);
     *(float*)(uintptr_t)(m + 0xd0) = 0.2f;
-    if (j->lod != 0 && g_layout) DCall(G(FN_MODEL_FREEARR), m, 0, 0);          // LOD 0 keeps its CPU copy for the collision test
+    if ((j->lod != 0 || !j->arr) && g_layout) DCall(G(FN_MODEL_FREEARR), m, 0, 0);   // the CPU copy only near the glider (collision)
     return m;
 }
 // Collision trees (stream thread) for LOD 0 chunks near the glider. The main thread asks (g_treeReq), the stream thread builds
@@ -477,7 +535,8 @@ static void BuildTrees(void) {             // stream thread
     }
     g_treeMs += Now() - t0; g_treesBuilt++; g_stNow = 0;
     EnterCriticalSection(&g_treeLock);
-    g_treeFor[c] = m; g_treeBusy = -1;
+    if (RD(m + 0xe4)) g_treeFor[c] = m;
+    g_treeBusy = -1;
     LeaveCriticalSection(&g_treeLock);
 }
 
@@ -553,7 +612,10 @@ static void JobDrop(Job* j) {
     g_pend[j->chunk] = -1; g_dropped++;
     JobFree(j);
 }
-static int JobWanted(const Job* j) { return g_want[j->chunk] == j->lod && g_res[j->chunk] != j->lod; }
+static int JobWanted(const Job* j) {
+    int c = j->chunk;
+    return g_want[c] == j->lod && (g_res[c] != j->lod || (j->arr && g_model[c] && !RD(g_model[c] + 0xe4)));   // or: the version with arrays
+}
 
 // One step of the main-thread work for job j: one texture, or one 4 MB piece of a buffer, or the final hook-up.
 // Returns 1 = more to do, 2 = waiting for a free staging resource (next frame), 0 = finished (model is live), -1 = dropped (j is freed).
@@ -615,7 +677,8 @@ static int StageJob(Job* j, uint32_t list) {
     }
     DCall(G(FN_MODEL_POS), L, m + 0x100, m + 0xf4);
     *(uint32_t*)(uintptr_t)(m + 0x8c) = RD(m + 0x100); *(uint32_t*)(uintptr_t)(m + 0x90) = RD(m + 0x104); *(uint32_t*)(uintptr_t)(m + 0x94) = 0;
-    if (j->lod != 0) DCall(G(FN_MODEL_FREEARR), m, 0, 0);       // no-op when the stream thread already did it
+    if (j->lod != 0 || !j->arr) DCall(G(FN_MODEL_FREEARR), m, 0, 0);   // no-op when the stream thread already did it
+    g_needArr[j->chunk] = 0;
     for (i = 0; i < h->n_parts && !g_noGpu; i++) if (p[i].texture >= 0) {
         uint32_t key = TexKey(p[i].texture, j->lod), part = RD(RD(m + 4) + 4 * i);
         *(uint32_t*)(uintptr_t)(part + 0x14c) = (uint32_t)(uintptr_t)g_tex[key].srv;   // borrowed: FreeModel clears it first
@@ -678,6 +741,8 @@ static void FrameTiming(double t) {
     memset(g_tf, 0, sizeof g_tf); g_fJobs = g_fTex = g_fFree = g_fBytes = 0;
     if (dt <= 0 || dt > 5000) return;                                            // pauses of the game loop (menus, loading)
     g_frameN++; if (dt > g_frameMax) g_frameMax = dt;
+    g_winFrames++; g_winMs += dt;
+    if (g_winMs > 3000) { g_fps = g_winFrames * 1000.0 / g_winMs; g_winFrames = 0; g_winMs = 0; }
     b = dt > 200 ? 3 : dt > 100 ? 2 : dt > 50 ? 1 : dt > 30 ? 0 : -1;
     if (b < 0) return;
     g_slow[b]++; if (g_pf[T_TOTAL] > dt * 0.5) g_slowOurs[b]++;
@@ -728,7 +793,10 @@ void AgStream_FrameTick(void) {
             int has = g_treeFor[c] == g_model[c];
             if (g_res[c] == 0 && !has) {
                 double dx = g_gx < b[0] ? b[0] - g_gx : g_gx > b[2] ? g_gx - b[2] : 0, dy = g_gy < b[1] ? b[1] - g_gy : g_gy > b[3] ? g_gy - b[3] : 0, d = dx * dx + dy * dy;
-                if (d < 500.0 * 500.0 && d < reqD) { reqD = d; req = c; }
+                if (d < 500.0 * 500.0) {
+                    if (!RD(g_model[c] + 0xe4)) g_needArr[c] = 1;        // loaded far away without the CPU copy: load again with it
+                    else if (d < reqD) { reqD = d; req = c; }
+                }
             }
             under = under && has;
             *(int32_t*)(uintptr_t)(g_model[c] + 0xec) = under ? gtx : -1000; *(int32_t*)(uintptr_t)(g_model[c] + 0xf0) = under ? gty : -1000;
@@ -779,6 +847,25 @@ static int WantLod(int c, int cur) {
     if (in->bytes[0] && g_gx >= b[0] && g_gx < b[2] && g_gy >= b[1] && g_gy < b[3] && g_gz - g_zb[c * 2 + 1] < 300.0) return 0;
     d = BoxDist(c, g_cx, g_cy, g_cz);
     if (d > g_range * (cur >= 0 ? 1.05 : 1.0)) return -1;
+    if (g_lodMode == 2) {                                                       // distance per kind of level
+        int coarse = -1, last = -1, k = 0;
+        for (l = 0; l < (int)g_L.n_lods; l++) if (in->bytes[l]) { last = l; if (in->level[l] >= 0) coarse = l; }
+        for (l = 0; l < (int)g_L.n_lods; l++) {
+            double D;
+            if (!in->bytes[l]) continue;
+            if (l == last) return l;                                            // the coarsest there is: up to 'range'
+            if (in->level[l] > 0 && l == coarse) D = g_blobs >= g_range ? 1e30 : (LevelDist(in->level[l]) > g_blobs ? LevelDist(in->level[l]) : g_blobs);
+            else if (in->level[l] > 0) D = LevelDist(in->level[l]);
+            else if (in->level[l] == 0) D = g_full;                             // full detail, landscape without detail sets
+            else {                                                              // generated
+                k++;
+                if (coarse >= 0 && in->level[coarse] > 0) D = g_blobs * (double)(2 << (k - 1));
+                else D = k == 1 ? g_blob1 : g_blob2;
+            }
+            if (d < D * (l == cur ? 1.1 : 1.0)) return l;
+        }
+        return last;
+    }
     if (d < 1.0) d = 1.0;
     for (l = (int)g_L.n_lods - 1; l >= 0; l--) {
         double px;
@@ -803,10 +890,10 @@ static int OpenInHelper(void) {
     if (st != 0) return 0;
     memcpy(&g_L, g_cl.arena, sizeof g_L);
     if (g_L.n_lods > C3H_MAX_LOD) g_L.n_lods = C3H_MAX_LOD;
-    free(g_info); free(g_box); free(g_zb); free((void*)g_want); free((void*)g_res); free((void*)g_pend); free(g_model); free(g_tex); free((void*)g_texHave); free(g_treeFor);
+    free(g_info); free(g_box); free(g_zb); free((void*)g_want); free((void*)g_res); free((void*)g_pend); free((void*)g_needArr); free(g_model); free(g_tex); free((void*)g_texHave); free(g_treeFor);
     g_info = malloc(g_L.n_chunks * sizeof *g_info + 1); memcpy(g_info, g_cl.arena + sizeof g_L, g_L.n_chunks * sizeof *g_info);
     g_box = malloc(g_L.n_chunks * 16 + 16); g_zb = malloc(g_L.n_chunks * 8 + 8); g_want = malloc(g_L.n_chunks * 4 + 4); g_res = malloc(g_L.n_chunks * 4 + 4);
-    g_pend = malloc(g_L.n_chunks * 4 + 4); g_model = calloc(g_L.n_chunks + 1, 4); g_treeFor = calloc(g_L.n_chunks + 1, 4);
+    g_pend = malloc(g_L.n_chunks * 4 + 4); g_needArr = calloc(g_L.n_chunks + 1, 1); g_model = calloc(g_L.n_chunks + 1, 4); g_treeFor = calloc(g_L.n_chunks + 1, 4);
     free(g_vb); free(g_ib); g_vb = calloc(g_L.n_chunks + 1, sizeof *g_vb); g_ib = calloc(g_L.n_chunks + 1, sizeof *g_ib);
     g_tex = calloc(g_L.n_textures * g_L.n_lods + 1, sizeof *g_tex); g_texHave = calloc(g_L.n_textures * g_L.n_lods + 1, 1);
     for (i = 0; i < (int)g_L.n_chunks; i++) {
@@ -820,7 +907,7 @@ static int OpenInHelper(void) {
         for (i = 0; i < (int)g_L.n_chunks; i++) for (k = 0; k < g_L.n_lods; k++) e[k] += g_info[i].err[k];
         ALog("LODs %u, mean geometric error %.2f / %.2f / %.2f / %.2f m; selection: %s, %.1f px, range %.0f m", g_L.n_lods,
              e[0] / (g_L.n_chunks + 1e-9), e[1] / (g_L.n_chunks + 1e-9), e[2] / (g_L.n_chunks + 1e-9), e[3] / (g_L.n_chunks + 1e-9),
-             g_lodMode ? "screen-space error" : "fixed ranges", g_tolPx, g_range); }
+             g_lodMode == 2 ? "distance per level" : g_lodMode ? "screen-space error" : "fixed ranges", g_tolPx, g_range); }
     g_listPtr = 0; g_lsPtr = 0;
     return 1;
 }
@@ -834,19 +921,24 @@ static DWORD WINAPI StreamThread(LPVOID unused) {
         if (g_state != 2 || !g_haveGlider || !g_haveCam) continue;
         BuildTrees();
         FreeQueued();
+        {   static DWORD lastCfg; if (GetTickCount() - lastCfg > 1000) { lastCfg = GetTickCount(); ConfigCheck(); } }
         for (c = 0; c < (int)g_L.n_chunks; c++) g_want[c] = WantLod(c, g_res[c]);
         if (g_qn >= 3) continue;
         for (c = 0; c < (int)g_L.n_chunks; c++) {                                 // nearest chunk whose LOD must change
             double d;
-            if (g_want[c] < 0 || g_want[c] == g_res[c] || g_pend[c] == g_want[c]) continue;
+            int upgrade = g_want[c] == 0 && g_res[c] == 0 && g_needArr[c] && g_pend[c] != 0;   // LOD 0 again, with CPU arrays
+            if (!upgrade && (g_want[c] < 0 || g_want[c] == g_res[c] || g_pend[c] == g_want[c])) continue;
             d = BoxDist(c, g_cx, g_cy, g_cz);
-            if (g_res[c] < 0) d *= 0.5;                                           // missing chunks before LOD changes
+            if (g_res[c] < 0 || upgrade) d *= 0.5;                                // missing chunks (and collision) before LOD changes
             if (d < bestD) { bestD = d; best = c; bestLod = g_want[c]; }
         }
         if (best < 0) continue;
         {   Job* j = calloc(1, sizeof *j); int st; const C3hChunk* h; const C3hPart* p; uint32_t i; double t0 = Now();
             InterlockedOr(&g_stMask, 1); g_stNow = 1;
             j->chunk = best; j->lod = bestLod; g_pend[best] = bestLod;
+            {   const float* b = &g_box[best * 4];                               // CPU arrays for LOD 0 within 1 km of the glider
+                double dx = g_gx < b[0] ? b[0] - g_gx : g_gx > b[2] ? g_gx - b[2] : 0, dy = g_gy < b[1] ? b[1] - g_gy : g_gy > b[3] ? g_gy - b[3] : 0;
+                j->arr = bestLod == 0 && dx * dx + dy * dy < 1000.0 * 1000.0; }
             st = C3h_Request(&g_cl, C3H_REQ_CHUNK, best, bestLod, NULL, 10000);
             if (st != 0) { ALog("chunk %d lod %d: status %d %s", best, bestLod, st, g_cl.hd->resp_msg); g_pend[best] = -1; free(j); g_stNow = 0; if (st < -100) g_state = -1; continue; }
             j->size = g_cl.hd->resp_size; j->blob = BigAlloc(j->size); memcpy(j->blob, g_cl.arena, j->size); g_bytesIn += j->size;
@@ -886,6 +978,14 @@ void AgStream_Stats(void (*out)(const char*, ...)) {
     out("ag: glider %.0f %.0f %.0f, camera %.0f %.0f %.0f, K %.0f px/rad; stream thread: io %.0f ms, models %.0f ms, %u collision trees %.0f ms, %u frees %.0f ms",
         g_gx, g_gy, g_gz, g_cx, g_cy, g_cz, g_K, g_ioMs, g_cpuMs, g_treesBuilt, g_treeMs, g_freedLater, g_freeMs);
     out("ag: staging: %u new textures, %u postponed uploads", g_stageNew, g_stageBusy);
+    {   unsigned long long tris = 0; unsigned parts = 0, byLevel[33] = {0}, gen = 0, unk = 0; int lv;
+        for (c = 0; c < (int)g_L.n_chunks; c++) if (g_res[c] >= 0 && g_model[c]) {
+            tris += g_info[c].tris[g_res[c]]; parts += RD(g_model[c] + 8);
+            lv = g_info[c].level[g_res[c]];
+            if (lv > 0 && lv < 33) byLevel[lv]++; else if (lv == 0) unk++; else gen++;
+        }
+        out("ag: resident %.1f M triangles in %u parts (draw calls); chunks by kind: L20 %u L19 %u L18 %u L17 %u full(unknown level) %u generated %u; %.1f fps",
+            tris / 1e6, parts, byLevel[20], byLevel[19], byLevel[18], byLevel[17], unk, gen, g_fps); }
     out("ag frames: %u, slowest %.0f ms; slow >30 ms %u (streaming caused %u), >50 %u (%u), >100 %u (%u), >200 %u (%u)",
         g_frameN, g_frameMax, g_slow[0], g_slowOurs[0], g_slow[1], g_slowOurs[1], g_slow[2], g_slowOurs[2], g_slow[3], g_slowOurs[3]);
 }
@@ -898,10 +998,11 @@ void InstallAgStream(void) {
     _snprintf(p, sizeof p, "%s\\postfx\\agstream.log", g_gameDir);
     g_log = fopen(p, "w");
     LoadConfig();
+    if (!g_cfgMarker) WriteConfigTemplate();
     _snprintf(p, sizeof p, "%s\\c3helper.exe", g_gameDir);
     if (GetFileAttributesA(p) == INVALID_FILE_ATTRIBUTES) { ALog("no %s: autogen streaming off", p); g_enable = 0; }
-    ALog("agstream: enable %d, LOD %s (tolerance %.1f px, range %.0f m; fixed ranges %.0f %.0f %.0f m), budget %.1f ms per frame",
-         g_enable, g_lodMode ? "by screen-space error" : "by fixed ranges", g_tolPx, g_range, g_r[0], g_r[1], g_r[2], g_budgetMs);
+    ALog("agstream: enable %d, lodmode %d (2 = distances: range %.0f, L20 %.0f L19 %.0f L18 %.0f L17 %.0f, blobs %.0f; without sets full %.0f blob1 %.0f blob2 %.0f), budget %.1f ms",
+         g_enable, g_lodMode, g_range, LevelDist(20), LevelDist(19), LevelDist(18), LevelDist(17), g_blobs, g_full, g_blob1, g_blob2, g_budgetMs);
     if (!g_enable) return;
     InitializeCriticalSection(&g_qlock); InitializeCriticalSection(&g_treeLock);
     r1 = DobbyInstrument(IdaAddrToRuntime(FN_CACHE_EXECUTE), CacheExecutePre);

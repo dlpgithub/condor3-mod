@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #define C3H_MAGIC        0x48334343u     /* 'CC3H' */
-#define C3H_VERSION      2u
+#define C3H_VERSION      3u
 #define C3H_HEADER_SIZE  4096u
 #define C3H_ARENA_SIZE   (48u << 20)     /* answer buffer; also limits the size of one chunk / texture */
 
@@ -57,6 +57,8 @@ typedef struct C3hChunkInfo {
     uint32_t bytes[C3H_MAX_LOD];        // answer size per LOD (0 = empty)
     uint32_t tris[C3H_MAX_LOD];
     float    err[C3H_MAX_LOD];          // geometric error per LOD in metres (detail sets: from the source level; clustering: cell / 2)
+    int8_t   level[C3H_MAX_LOD];        // what each LOD is: > 0 = real export data of that 3D-tiles level (finest level in it),
+                                        // 0 = real full detail of unknown level (no Autogen/lods.txt), -1 = generated (clustering)
 } C3hChunkInfo;
 
 typedef struct C3hChunk {
