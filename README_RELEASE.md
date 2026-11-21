@@ -6,8 +6,8 @@ This package has three parts:
    **autogen streaming**, which lets Condor fly very large 3D photo-scenery landscapes (whole cities) without running out of memory.
 2. **The autogen helper** (`c3helper.exe`), a small background program the mod starts by itself. It holds the 3D buildings of the
    landscape and hands the mod what is near you.
-3. **The landscape compiler** (`tiles2condor_v2`), which turns a 3D-tiles export (photogrammetry: Google 3D tiles exported with
-   earth-rea, "3D Tiles - one glb per file") into a complete Condor 3 landscape.
+3. **The landscape compiler** (`tiles2condor_v2`), which turns a 3D-tiles export (photogrammetry 3D tiles, for example exported
+   with earth-rea as "3D Tiles - one glb per file") into a complete Condor 3 landscape.
 
 You only need part 3 if you want to make your own landscapes.
 
@@ -128,3 +128,32 @@ With mixed-level exports the compiler also writes coarser versions of the 3D bui
   Lower `budget` or `L19` in `agstream.txt` if the mod is the cause.
 - **Buildings blurry in the distance:** the landscape was probably made with an old compiler or from an export without coarser
   levels; rebuild it with `tiles2condor_v2` from a mixed-level export. Raise `L19` for sharper buildings farther out.
+
+## Legal notice and disclaimer
+
+- **Research project.** This software is an independent, non-commercial research and educational project about game engine
+  interoperability, rendering and 3D data processing. It is published in the hope that it is useful, without any promise that it is.
+- **No warranty.** The software is provided "as is", without warranty of any kind, express or implied, including but not limited to
+  the warranties of merchantability, fitness for a particular purpose, accuracy, compatibility and non-infringement. You use it
+  entirely at your own risk. Back up your Condor installation and your data before installing.
+- **No liability.** To the maximum extent permitted by applicable law, the author(s) and contributors shall not be liable for any
+  claim, damage or other liability, whether direct, indirect, incidental, special, consequential or exemplary (including but not
+  limited to loss of data, damage to software or hardware, loss of profits, account suspensions or legal costs), arising from, out of
+  or in connection with the software, its use, its misuse or the inability to use it, even if advised of the possibility of such damage.
+- **Your responsibility.** You alone are responsible for making sure that your use of this software is lawful where you live and
+  complies with every licence and terms of service that applies to you, in particular:
+  - the end-user licence agreement and terms of use of Condor 3 (this software modifies how the game runs and replaces one of its
+    files; whether that is allowed for you is your decision and your responsibility);
+  - the terms of service, licences and attribution requirements of any map, imagery or 3D-tiles data you export, convert or use
+    (they may restrict exporting, caching, offline use, modification and redistribution of the content), and the copyrights of the
+    imagery providers;
+  - any laws on copyright, databases, privacy, aviation and the use of geographic data that apply to you.
+- **No data included, no redistribution rights granted.** This package contains no map, imagery or 3D-tiles data. Landscapes you
+  create may contain third-party content; this software grants you no rights to that content. Do not share or publish such
+  landscapes unless you hold the necessary rights.
+- **Not affiliated.** This project is not affiliated with, endorsed by or supported by the developers or publishers of Condor or
+  by any data provider. All product names, trademarks and registered trademarks are the property of their respective
+  owners and are used for identification only. Do not contact the Condor developers for support with this software.
+- **Third-party components** are subject to their own licences (see `licenses/` and `postfx/default_lut/ATTRIBUTION.txt`).
+- If any part of this notice is held invalid or unenforceable, the remaining parts stay in effect. If you do not agree with this
+  notice, do not install or use the software.
