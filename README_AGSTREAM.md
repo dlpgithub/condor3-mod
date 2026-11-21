@@ -1,7 +1,8 @@
 # Autogen streaming (beats the 32-bit memory limit)
 
 `src/agstream.c` (option `ENABLE_AGSTREAM`, on by default) switches Condor's own autogen loading off and streams the autogen of the
-current landscape from the 64-bit helper `c3helper.exe` (separate repo `../condor3-helper`, see its README and docs/).
+current landscape from the 64-bit helper `c3helper.exe` (repo condor3-helper, git submodule `external/condor3-helper`, see its README
+and docs/; the mod also takes the protocol `c3h_proto.h` and the client `c3h_client.c` from there).
 
 - The game normally holds every autogen tile of a 4 x 4 tile window as one model, mesh kept twice (CPU + GPU): 2.3 GB in flight for
   OrlyDemo, crash for a 3x denser copy. With streaming: 0.9 GB / 1.3 GB, same look.
@@ -16,7 +17,7 @@ current landscape from the 64-bit helper `c3helper.exe` (separate repo `../condo
   there too. The main thread (`AgStream_FrameTick`, HUD hook) only uploads textures and 4 MB buffer pieces and hooks models into the
   game's list, within a time budget per frame (`budget`, 3 ms). Slow frames are logged with their cause in agstream.log.
 - Without `c3helper.exe` next to Condor.exe (or with `enable 0` in `<game>/postfx/agstream.txt`) the game behaves as before.
-- Install: build condor3-helper (`../condor3-helper/scripts/build.sh` puts `c3helper.exe` into `build/`), then `scripts/postfx.sh install`
+- Install: `scripts/build_docker.sh` builds `build/d3dx.dll` and `build/c3helper.exe` (fetches the submodule if needed), then `scripts/postfx.sh install`
   / `scripts\postfx.bat install "C:\Condor3"` copies it next to Condor.exe.
 - Remote commands (postfx/cmd.txt): `ag` streaming state + frame statistics, `vm` address-space use (`vm auto on|off`: every 10 s,
   off by default since walking the address space stalls), `vmbig` big allocations with their first bytes.

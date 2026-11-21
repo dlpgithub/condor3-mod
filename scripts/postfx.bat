@@ -13,7 +13,7 @@ rem   1. backs up the game's own d3dx.dll as d3dx.dll.before_postfx (only the fi
 rem   2. copies build\d3dx.dll (the prebuilt mod) over d3dx.dll
 rem   3. creates <game>\postfx with postfx.hlsl and the colour LUT (postfx\user\lut.cube, else the default one)
 rem   4. copies the patched shaders from shaders\build\Effects\fx into <game>\Effects\fx
-rem   5. copies build\c3helper.exe (64-bit autogen helper, from condor3-helper) next to Condor.exe, if present
+rem   5. copies build\c3helper.exe (64-bit autogen helper, built by scripts/build_docker.sh from external/condor3-helper) next to Condor.exe, if present
 rem
 rem Needs the same Condor version the mod was made for (3.1.0): the mod patches fixed addresses in Condor.exe.
 rem Keys in the game: F9 = effect on/off, F8 = reload shader, F10 = capture frame.
