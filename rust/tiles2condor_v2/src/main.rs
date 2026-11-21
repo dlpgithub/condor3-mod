@@ -1,7 +1,7 @@
 //! tiles2condor_v2 - build a Condor 3 landscape from 3D Tiles exports (one GLB per tile, e.g. from the "earth-rea" tile library).
 //! Rewrite of rust/tiles2condor (v1): same command line, config and output files; GPU raster (wgpu), each GLB decoded once for photo and
 //! 3D objects, terrain and fill colours computed per Condor tile (memory independent of the landscape size). Manual: README.md here.
-mod bg; mod finish; mod fmt; mod geo; mod gpu; mod grid; mod plan; mod render; mod scan; mod src; mod terrain;
+mod bg; mod finish; mod fmt; mod geo; mod gpu; mod grid; mod plan; mod render; mod runway; mod scan; mod src; mod terrain;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;

@@ -34,6 +34,8 @@ You only need part 3 if you want to make your own landscapes.
 | `scripts/tune.sh` | Mac: change tuning values while the game runs (`scripts/tune.sh lut_strength 0.5`) |
 | `bin/tiles2condor_v2` (`.exe` on Windows) | the landscape compiler |
 | `examples/orly.json`, `examples/eiffel.json` | example compiler settings (Paris Orly with its three runways; Eiffel tower area) |
+| `examples/orly_custom_runway.json` | Orly with custom high-resolution runways |
+| `assets/runway/` | textures for custom runways (asphalt, concrete, grass, markings paint) |
 | `docs/TILES2CONDOR.md` | complete reference of the compiler settings and output files |
 | `licenses/` | licences of included third-party code (Dobby hooking library) |
 
@@ -105,6 +107,11 @@ longer than 30 ms and why), `c3helper.log` (the helper loading the landscape).
    On Windows: `bin\tiles2condor_v2.exe ...` with Windows paths.
 4. Start Condor, choose the landscape and an airport in the flight planner. Install the mod for large landscapes (see above),
    otherwise Condor may run out of memory with many 3D buildings.
+
+**Runways:** by default an airport's runway is the satellite photo. Add `"runway_look": "custom"` to an airport in your settings for a
+sharp, high-resolution runway with markings instead (asphalt, `"surface": "concrete"` or `"surface": "grass"`); see
+`examples/orly_custom_runway.json` and `docs/TILES2CONDOR.md`. The textures for it are in `assets/runway/` (replace them with your
+own of the same names if you like). Rebuild only the airports with `--only airports` (takes seconds).
 
 Useful options:
 - `--only plan` takes seconds and shows what will be built: which detail levels are used where, texture sizes, runways

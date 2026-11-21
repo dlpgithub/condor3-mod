@@ -74,6 +74,14 @@ level must cover to count. Rendering (stage raster) happens per Condor tile at t
 - One entry = one Condor airport = ONE runway (Condor's `.apt` knows a single runway per airport). `from` / `to` are the lat, lon of the two
   runway ends; the glider starts 200 m after `from`, heading towards `to`. Several runways of one real airport = several entries
   (`examples/orly.json` has Orly's three). Optional: `primary_reversed`, `tow_primary_left`, `tow_secondary_left`.
+- **Runway look** (v2 compiler): by default the runway is the photo of the terrain texture (`"runway_look": "photo"`). With
+  `"runway_look": "custom"` in an airport entry the runway gets a high-resolution surface instead, made from the textures in
+  `assets/runway/` (or the folder given as top-level `"runway_textures"`): asphalt with rubber in the touchdown zones, repairs and
+  worn edges, or concrete slabs (`"surface": "concrete"`), or mown grass with worn wheel tracks (`"surface": "grass"`), plus ICAO-style
+  markings for paved runways (threshold stripes, designators, centreline, aiming point, touchdown zone, side stripes;
+  `"markings": false` leaves them out, `"designators": ["06", "24"]` sets the numbers, default from the heading). The wheels roll on
+  asphalt / grass accordingly. `"align": true` moves the runway sideways onto the paved strip of the photo when the configured ends are
+  a few metres off (off by default; better correct `from` / `to`). Example: `examples/orly_custom_runway.json`.
 - `objects.min_level`: source tiles coarser than this level produce no 3D objects (their area is photo only). `"objects": false` disables 3D.
 - (JSON has no comments; the `//` notes above are explanation only.)
 

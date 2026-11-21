@@ -204,7 +204,7 @@ fn boxmesh(cx: f32, cy: f32, z0: f32, w: f32, d: f32, h: f32) -> (Vec<[f32; 8]>,
 }
 
 pub fn stage_airports(plan: &Plan, cfg: &Value, work: &str, out: &str, name: &str) {
-    let afs = airfields(cfg, plan);
+    let mut afs = airfields(cfg, plan);
     std::fs::create_dir_all(format!("{}/Airports/Textures", out)).unwrap();
     let ter = Terrain::load(plan, out);
     let (gw, gh) = (plan.nx * CELLS, plan.ny * CELLS);
@@ -213,6 +213,31 @@ pub fn stage_airports(plan: &Plan, cfg: &Value, work: &str, out: &str, name: &st
     let zs = TileSet::new(plan, 1, move |tx, ty| zmin_path(&wb, tx, ty));
     let cny = ter.ny - 1;
     let mut claimed = vec![false; (ter.nx - 1) * cny];
+    let ads: Vec<Value> = cfg["airports"].as_array().cloned().unwrap_or_default();
+    let custom = |ai: usize| ads.get(ai).and_then(|d| d["runway_look"].as_str()).map(|s| s.eq_ignore_ascii_case("custom")).unwrap_or(false);
+    let rtex = if (0..afs.len()).any(|ai| custom(ai)) {
+        let t = crate::runway::prepare(cfg);
+        if t.is_none() { log("runway textures not found (config \"runway_textures\" or assets/runway next to the program): photo runways kept"); }
+        t
+    } else { None };
+    // custom runways: centre them on the paved strip of the photo only when asked ("align": true)
+    for (ai, af) in afs.iter_mut().enumerate() {
+        let surf = ads[ai]["runway"]["surface"].as_str().unwrap_or("asphalt").to_lowercase();
+        if !custom(ai) || rtex.is_none() || ["grass", "gras", "turf"].contains(&surf.as_str()) || ads[ai]["runway"]["align"].as_bool() != Some(true) { continue; }
+        let corners: Vec<(f64, f64)> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().map(|(a, b)| af.to_world(a * (af.wid / 2.0 + 60.0), b * af.len / 2.0)).collect();
+        let (xmin, xmax) = corners.iter().fold((f64::MAX, f64::MIN), |m, c| (m.0.min(c.0), m.1.max(c.0)));
+        let (ymin, ymax) = corners.iter().fold((f64::MAX, f64::MIN), |m, c| (m.0.min(c.1), m.1.max(c.1)));
+        let (rgb, pw, ph, bounds) = crop_ortho(plan, work, ai, plan.east0 - xmax, plan.east0 - xmin, plan.north0 + ymin, plan.north0 + ymax);
+        match crate::runway::align(af, &rgb, pw, ph, bounds, plan.east0, plan.north0) {
+            Some((o, score)) if o != 0.0 => {
+                let (nx, ny) = af.to_world(o, 0.0); af.x0 = nx; af.y0 = ny; let (la, lo) = plan.latlon(nx, ny); af.lat = la; af.lon = lo;
+                log(&format!("airport {}: runway moved {:.0} m to the {} (seen from the 'from' end) onto the paved strip of the photo (match {:.2}; \"align\": false keeps the configured position)", af.name, o.abs(), if o > 0.0 { "left" } else { "right" }, score));
+            }
+            Some(_) => {}
+            None => log(&format!("airport {}: no clear runway strip in the photo, configured position kept", af.name)),
+        }
+    }
+    let strips: Vec<&Airfield> = afs.iter().enumerate().filter(|(ai, _)| custom(*ai) && rtex.is_some()).map(|(_, a)| a).collect();
     let mut recs: Vec<u8> = vec![]; let mut cup = vec!["name,code,country,lat,lon,elev,style,rwdir,rwlen,freq,desc".to_string()]; let mut info = vec![];
     for (ai, af) in afs.iter().enumerate() {
         let (i0, i1, j0, j1) = airport_cells(plan, af);
@@ -234,7 +259,13 @@ pub fn stage_airports(plan: &Plan, cfg: &Value, work: &str, out: &str, name: &st
             if af.outside(cx, cy) == 0.0 && vz[vr * w + vc].is_finite() && !claimed[i * cny + j] { cells.push((i, j, af.grass && greens[vr * w + vc] > 0.85)); }
         } }
         if cells.is_empty() { log(&format!("airport {}: outside the data or fully overlapped, skipped", af.name)); continue; }
+        let rw_custom = custom(ai) && rtex.is_some();
+        // a 22.5 m cell reaches 16 m from its centre: cells closer than that (+2 m) to ANY custom runway (also of another airport
+        // whose ground area overlaps) would lie in it and show photo or 3D grass
+        let on_strip = |c: &(usize, usize, bool)| { let (x, y) = ((c.0 as f64 + 0.5) * 22.5, (c.1 as f64 + 0.5) * 22.5);
+            strips.iter().any(|o| { let (xl, yl) = o.to_local(x, y); xl.abs() < o.wid / 2.0 + 18.0 && yl.abs() < o.len / 2.0 + 18.0 }) };
         // The G file only carries GRASS (Grass3D = photo x grass detail + 3D blades); paved areas are left to the plain terrain texture.
+        if !strips.is_empty() { cells.retain(|c| !on_strip(c)); }                          // the custom surfaces cover their strips
         if cells.iter().filter(|c| c.2).count() >= 4 { cells.retain(|c| c.2); }
         else {                                                                    // no grass at all: one cell beside the runway keeps the mandatory file valid
             let key = |c: &(usize, usize, bool)| { let (xl, yl) = af.to_local((c.0 as f64 + 0.5) * 22.5, (c.1 as f64 + 0.5) * 22.5); xl.abs() + yl.abs() * 0.01 - af.hx };
@@ -249,6 +280,7 @@ pub fn stage_airports(plan: &Plan, cfg: &Value, work: &str, out: &str, name: &st
         let (xw0, xw1, yn0, yn1) = (ci0 as f64 * 22.5, (ci1 + 1) as f64 * 22.5, cj0 as f64 * 22.5, (cj1 + 1) as f64 * 22.5);
         let (rgb, pw, ph, [e0, e1, n0, n1]) = crop_ortho(plan, work, ai, plan.east0 - xw1, plan.east0 - xw0, plan.north0 + yn0, plan.north0 + yn1);
         let alpha: Vec<u8> = (0..pw * ph).map(|i| { let (r, g, b) = (rgb[i * 3] as i32, rgb[i * 3 + 1] as i32, rgb[i * 3 + 2] as i32); if af.grass && g > r + 6 && g > b + 10 { 110 } else { 0 } }).collect();
+        let mut rw_info = "photo runway".to_string();
         let td = format!("{}/Airports/Textures/{}", out, af.name); std::fs::create_dir_all(&td).unwrap();
         write_bgra(&format!("{}/{}_Ground.dds", td, af.name), &rgb, &alpha, pw, ph);
         // ground mesh = the terrain triangles themselves
@@ -272,7 +304,11 @@ pub fn stage_airports(plan: &Plan, cfg: &Value, work: &str, out: &str, name: &st
         }
         let ncell = cells.len();
         let gobj = Obj { name: "Grass3D".into(), texture: format!("Textures\\{}\\{}_Ground.dds", af.name, af.name), color: [1.; 4], params: [0.; 3], verts: v, idx };
-        std::fs::write(format!("{}/Airports/{}G.c3d", out, af.name), c3d_bytes(&[gobj])).unwrap();
+        let mut gobjs = vec![gobj];
+        if rw_custom {
+            if let Some(b) = crate::runway::build(af, &ads[ai], &ter, h0, rtex.as_ref().unwrap(), out, ai) { gobjs.extend(b.objs); rw_info = b.info; }
+        }
+        std::fs::write(format!("{}/Airports/{}G.c3d", out, af.name), c3d_bytes(&gobjs)).unwrap();
         // objects: a windsock beside the runway start
         let (wx, wy) = (af.wid / 2.0 + 35.0, -af.len / 2.0 + 320.0);
         let ww = af.to_world(wx, wy); let wz = (ter.height(ww.0, ww.1) - h0) as f32; let (wx, wy) = (wx as f32, wy as f32);
@@ -289,8 +325,8 @@ pub fn stage_airports(plan: &Plan, cfg: &Value, work: &str, out: &str, name: &st
             la as i64, (la - la.floor()) * 60.0, if af.lat < 0.0 { "S" } else { "N" }, lo as i64, (lo - lo.floor()) * 60.0, if af.lon < 0.0 { "W" } else { "E" },
             h0, if af.asphalt { 5 } else { 2 }, af.heading.round() as i64, af.len, af.freq));
         info.push(serde_json::json!({"name": af.name, "x": af.x0, "y": af.y0, "z": h0, "heading": af.heading, "length": af.len}));
-        log(&format!("airport {}: heading {:.2}, {:.0} x {:.0} m, elevation {:.1} m, ground {} cells, photo {} x {} px; flight plan TPPosX={:.1} TPPosY={:.1} TPPosZ={:.0}",
-            af.name, af.heading, af.len, af.wid, h0, ncell, pw, ph, af.x0, af.y0, h0));
+        log(&format!("airport {}: heading {:.2}, {:.0} x {:.0} m, elevation {:.1} m, ground {} cells, photo {} x {} px, {}; flight plan TPPosX={:.1} TPPosY={:.1} TPPosZ={:.0}",
+            af.name, af.heading, af.len, af.wid, h0, ncell, pw, ph, rw_info, af.x0, af.y0, h0));
     }
     std::fs::write(format!("{}/{}.apt", out, name), recs).unwrap();
     std::fs::write(format!("{}/{}.cup", out, name), cup.join("\r\n") + "\r\n").unwrap();

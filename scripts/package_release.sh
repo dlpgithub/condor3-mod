@@ -78,6 +78,7 @@ put scripts/postfx.sh                    scripts/postfx.sh
 put scripts/tune.sh                      scripts/tune.sh
 put "$COMPILER"                          "$COMPILER"
 for f in examples/*.json; do put "$f" "$f"; done
+for f in assets/runway/*; do put "$f" "$f"; done
 put docs/TILES2CONDOR.md                 docs/TILES2CONDOR.md
 put external/dobby-fork/LICENSE          licenses/Dobby-LICENSE.txt
 chmod +x "$OUT/scripts/"*.sh "$OUT/$COMPILER"
