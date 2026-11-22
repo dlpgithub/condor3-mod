@@ -87,7 +87,8 @@ cbuffer TUNE : register(b1) { float4 g_t[16]; }
 #define BLOOM_STRENGTH   T(4)    // glow around bright areas (sun, clouds, water glints)
 #define BLOOM_THRESHOLD  0.55    // linear brightness where glow starts
 #define AO_STRENGTH      T(6)    // 0 = off. Darkens creases, tree bases, building edges
-#define AO_RADIUS        8.0     // metres
+#define AO_RADIUS        8.0     // metres (far terrain)
+#define AO_MAX_PX        16.0    // ... but never more than this many pixels: 12 samples cannot cover a bigger disc without noise
 #define AO_FADE_NEAR     1500.0  // metres: AO starts fading ...
 #define AO_FADE_FAR      6000.0  //         ... and is gone here
 #define SHARPEN          T(7)    // local contrast / detail (0 = off)
@@ -270,8 +271,12 @@ float PS_AO(VSO i) : SV_Target
     float3 N = normalize(cross(dx, dy));
     if (dot(N, P) > 0) N = -N;                       // face the camera
 
+    // Near the camera (aircraft in the outside view, nearby ground, cockpit) 8 m are hundreds of pixels: 12 samples spread over that
+    // gave blotchy, grid-like darkening (the wing above counted as an occluder of the whole fuselage). The radius is capped in
+    // pixels instead, so near objects get small, well-sampled crease shading; far terrain (8 m < 16 px beyond ~250 m) is unchanged.
     float pxPerMeter = 0.5 * g_screen.x * g_proj.x / z;
-    float rpx = clamp(AO_RADIUS * pxPerMeter, 3.0, 96.0);
+    float R = min(AO_RADIUS, AO_MAX_PX / pxPerMeter);
+    float rpx = max(R * pxPerMeter, 3.0);
     float angle0 = IGN(i.pos.xy, 0.0) * 6.2831853;
 
     float occ = 0;
@@ -287,7 +292,7 @@ float PS_AO(VSO i) : SV_Target
         float3 v = ViewPos(q, zq) - P;
         float len = length(v) + 1e-4;
         float c = dot(N, v) / len;
-        float w = saturate(1.0 - len / AO_RADIUS);
+        float w = saturate(1.0 - len / R);
         occ += saturate(c - 0.12) * w;
     }
     return saturate(1.0 - 1.7 * occ / AO_SAMPLES);
