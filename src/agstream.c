@@ -214,12 +214,13 @@ static volatile uint8_t* g_needArr;      // main thread: LOD 0 chunk came near t
 static uint32_t*     g_model;            // main thread: game model per chunk
 static TexEntry*     g_tex;              // [n_textures * n_lods], main thread
 static volatile uint8_t* g_texHave;      // 1 = created (main thread), read by the stream thread
+static volatile uint8_t* g_texBad;       // the helper could not deliver it (stream thread): parts are drawn without it, never asked again
 static CRITICAL_SECTION g_qlock; static Job* g_qhead; static Job* g_qtail; static volatile int g_qn;
 static uint32_t g_lsPtr, g_listPtr;      // landscape object / autogen resident list we stream into
 static volatile double g_gx, g_gy, g_gz; // glider position (main thread copies it each tick)
 static volatile int g_haveGlider, g_haveCam;
 static volatile double g_cx, g_cy, g_cz, g_K = 923.0;   // camera position (world), pixels per radian (viewport height * m11 / 2)
-static unsigned g_ticks, g_created, g_freed, g_dropped, g_texMissing; static unsigned long long g_bytesIn;
+static unsigned g_ticks, g_created, g_freed, g_dropped, g_texMissing, g_emptyChunks; static unsigned long long g_bytesIn;
 static double g_ioMs, g_cpuMs;
 
 static uint32_t World(void)  { uintptr_t p = RD(G(VAR_WORLD)); return Ok(p, 4) ? RD(p) : 0; }
@@ -632,7 +633,7 @@ static int StageJob(Job* j, uint32_t list) {
             uint32_t key; TexEntry* t; int k;
             if (p[j->texStep].texture < 0) continue;
             key = TexKey(p[j->texStep].texture, j->lod); t = &g_tex[key];
-            if (t->srv) continue;
+            if (t->srv || g_texBad[key]) continue;
             for (k = 0; k < j->ntex; k++) if (j->tex[k].key == key) break;
             if (k == j->ntex) { g_texMissing++; JobDrop(j); return -1; }
             g_texBusy = 0;
@@ -663,7 +664,7 @@ static int StageJob(Job* j, uint32_t list) {
     if (g_model[j->chunk] && TreeBusy(j->chunk)) return 1;
     for (i = 0; i < h->n_parts && !g_noGpu; i++) if (p[i].texture >= 0) {
         uint32_t key = TexKey(p[i].texture, j->lod);
-        if (!g_tex[key].srv) { g_texMissing++; JobDrop(j); return -1; }
+        if (!g_tex[key].srv && !g_texBad[key]) { g_texMissing++; JobDrop(j); return -1; }
     }
     *(uint32_t*)(uintptr_t)(m + 0x50) = DCall(G(FN_EFFECT), RD(RD(G(VAR_EFFECTMGR))), 0, 0);   // main-thread part of AfterTesselate
     if (g_noGpu) ;
@@ -683,6 +684,7 @@ static int StageJob(Job* j, uint32_t list) {
     g_needArr[j->chunk] = 0;
     for (i = 0; i < h->n_parts && !g_noGpu; i++) if (p[i].texture >= 0) {
         uint32_t key = TexKey(p[i].texture, j->lod), part = RD(RD(m + 4) + 4 * i);
+        if (!g_tex[key].srv) continue;                           // texture the helper could not deliver
         *(uint32_t*)(uintptr_t)(part + 0x14c) = (uint32_t)(uintptr_t)g_tex[key].srv;   // borrowed: FreeModel clears it first
         g_tex[key].users++; g_tex[key].lastUse = g_ticks;
     }
@@ -892,12 +894,12 @@ static int OpenInHelper(void) {
     if (st != 0) return 0;
     memcpy(&g_L, g_cl.arena, sizeof g_L);
     if (g_L.n_lods > C3H_MAX_LOD) g_L.n_lods = C3H_MAX_LOD;
-    free(g_info); free(g_box); free(g_zb); free((void*)g_want); free((void*)g_res); free((void*)g_pend); free((void*)g_needArr); free(g_model); free(g_tex); free((void*)g_texHave); free(g_treeFor);
+    free(g_info); free(g_box); free(g_zb); free((void*)g_want); free((void*)g_res); free((void*)g_pend); free((void*)g_needArr); free(g_model); free(g_tex); free((void*)g_texHave); free((void*)g_texBad); free(g_treeFor);
     g_info = malloc(g_L.n_chunks * sizeof *g_info + 1); memcpy(g_info, g_cl.arena + sizeof g_L, g_L.n_chunks * sizeof *g_info);
     g_box = malloc(g_L.n_chunks * 16 + 16); g_zb = malloc(g_L.n_chunks * 8 + 8); g_want = malloc(g_L.n_chunks * 4 + 4); g_res = malloc(g_L.n_chunks * 4 + 4);
     g_pend = malloc(g_L.n_chunks * 4 + 4); g_needArr = calloc(g_L.n_chunks + 1, 1); g_model = calloc(g_L.n_chunks + 1, 4); g_treeFor = calloc(g_L.n_chunks + 1, 4);
     free(g_vb); free(g_ib); g_vb = calloc(g_L.n_chunks + 1, sizeof *g_vb); g_ib = calloc(g_L.n_chunks + 1, sizeof *g_ib);
-    g_tex = calloc(g_L.n_textures * g_L.n_lods + 1, sizeof *g_tex); g_texHave = calloc(g_L.n_textures * g_L.n_lods + 1, 1);
+    g_tex = calloc(g_L.n_textures * g_L.n_lods + 1, sizeof *g_tex); g_texHave = calloc(g_L.n_textures * g_L.n_lods + 1, 1); g_texBad = calloc(g_L.n_textures * g_L.n_lods + 1, 1);
     for (i = 0; i < (int)g_L.n_chunks; i++) {
         float cxw = ((float)g_info[i].tile_x + 0.5f) * g_L.tile_size, cyw = ((float)g_info[i].tile_y + 0.5f) * g_L.tile_size;
         g_box[i * 4 + 0] = cxw + g_info[i].min[0]; g_box[i * 4 + 1] = cyw + g_info[i].min[1];
@@ -944,20 +946,31 @@ static DWORD WINAPI StreamThread(LPVOID unused) {
             {   const float* b = &g_box[best * 4];                               // CPU arrays for LOD 0 within 1 km of the glider
                 double dx = g_gx < b[0] ? b[0] - g_gx : g_gx > b[2] ? g_gx - b[2] : 0, dy = g_gy < b[1] ? b[1] - g_gy : g_gy > b[3] ? g_gy - b[3] : 0;
                 j->arr = bestLod == 0 && dx * dx + dy * dy < 1000.0 * 1000.0; }
-            st = C3h_Request(&g_cl, C3H_REQ_CHUNK, best, bestLod, NULL, 10000);
+            st = C3h_Request(&g_cl, C3H_REQ_CHUNK, best, bestLod, NULL, 120000);   // big landscapes: the first chunk of a tile reads the tile
+            if (st == 1) {                                                         // nothing there (lazy tiles: known only now): never again
+                memset(g_info[best].bytes, 0, sizeof g_info[best].bytes); g_pend[best] = -1; free(j); g_stNow = 0; g_emptyChunks++; continue;
+            }
             if (st != 0) { ALog("chunk %d lod %d: status %d %s", best, bestLod, st, g_cl.hd->resp_msg); g_pend[best] = -1; free(j); g_stNow = 0; if (st < -100) g_state = -1; continue; }
             j->size = g_cl.hd->resp_size; j->blob = BigAlloc(j->size); memcpy(j->blob, g_cl.arena, j->size); g_bytesIn += j->size;
             h = (const C3hChunk*)j->blob; p = (const C3hPart*)(h + 1);
+            if (g_info[best].max[2] >= 9000.0f && h->n_verts) {                  // lazy tiles: real bounds from the first data of the chunk
+                const C3hVertex* v = (const C3hVertex*)(p + h->n_parts); float mn[3] = { 1e30f, 1e30f, 1e30f }, mx[3] = { -1e30f, -1e30f, -1e30f }; uint32_t q; int a;
+                float cxw = ((float)g_info[best].tile_x + 0.5f) * g_L.tile_size, cyw = ((float)g_info[best].tile_y + 0.5f) * g_L.tile_size;
+                for (q = 0; q < h->n_verts; q++) for (a = 0; a < 3; a++) { if (v[q].pos[a] < mn[a]) mn[a] = v[q].pos[a]; if (v[q].pos[a] > mx[a]) mx[a] = v[q].pos[a]; }
+                memcpy(g_info[best].min, mn, sizeof mn); memcpy(g_info[best].max, mx, sizeof mx);
+                g_box[best * 4 + 0] = cxw + mn[0]; g_box[best * 4 + 1] = cyw + mn[1]; g_box[best * 4 + 2] = cxw + mx[0]; g_box[best * 4 + 3] = cyw + mx[1];
+                g_zb[best * 2 + 0] = mn[2]; g_zb[best * 2 + 1] = mx[2];
+            }
             for (i = 0; i < h->n_parts && j->ntex < 32; i++) if (p[i].texture >= 0) {
                 uint32_t key = TexKey(p[i].texture, bestLod); int k, dup = 0;
-                if (g_texHave[key]) continue;
+                if (g_texHave[key] || g_texBad[key]) continue;
                 for (k = 0; k < j->ntex; k++) dup |= j->tex[k].key == key;
                 if (dup) continue;
                 if (C3h_Request(&g_cl, C3H_REQ_TEXTURE, p[i].texture, bestLod, NULL, 10000) == 0) {
                     j->tex[j->ntex].key = key; j->tex[j->ntex].size = g_cl.hd->resp_size;
                     j->tex[j->ntex].dds = BigAlloc(g_cl.hd->resp_size); memcpy(j->tex[j->ntex].dds, g_cl.arena, g_cl.hd->resp_size);
                     g_bytesIn += g_cl.hd->resp_size; j->ntex++;
-                }
+                } else { g_texBad[key] = 1; ALog("texture %d lod %d: helper could not deliver it (%s): drawn without", p[i].texture, bestLod, g_cl.hd->resp_msg); }
             }
             g_ioMs += Now() - t0; t0 = Now(); InterlockedOr(&g_stMask, 2); g_stNow = 2;
             j->model = BuildModelCpu(j);                                           // game objects + bounds, off the main thread
@@ -1031,7 +1044,7 @@ void AgStream_Stats(void (*out)(const char*, ...)) {
         g_L.n_chunks, n[0], n[1], n[2], n[3], n[4], t, g_qn, g_created, g_freed, g_dropped, g_texMissing, (unsigned)(g_bytesIn >> 20), g_texCreated, g_texReused, g_npool, g_poolBytes >> 20, g_bufCreated, g_bufReused, g_nbpool, g_bpoolBytes >> 20);
     out("ag: glider %.0f %.0f %.0f, camera %.0f %.0f %.0f, K %.0f px/rad; stream thread: io %.0f ms, models %.0f ms, %u collision trees %.0f ms, %u frees %.0f ms",
         g_gx, g_gy, g_gz, g_cx, g_cy, g_cz, g_K, g_ioMs, g_cpuMs, g_treesBuilt, g_treeMs, g_freedLater, g_freeMs);
-    out("ag: staging: %u new textures, %u postponed uploads", g_stageNew, g_stageBusy);
+    out("ag: staging: %u new textures, %u postponed uploads; %u chunk slots turned out empty", g_stageNew, g_stageBusy, g_emptyChunks);
     {   unsigned long long tris = 0; unsigned parts = 0, byLevel[33] = {0}, gen = 0, unk = 0; int lv;
         for (c = 0; c < (int)g_L.n_chunks; c++) if (g_res[c] >= 0 && g_model[c]) {
             tris += g_info[c].tris[g_res[c]]; parts += RD(g_model[c] + 8);
