@@ -191,8 +191,9 @@ static void ConfigCheck(void) {                                  // stream threa
 
 // ---- state ---------------------------------------------------------------------------------------------------
 typedef struct { uint32_t key; uint8_t* dds; uint32_t size; } JobTex;
+#define JOB_MAX_TEX 64                     // distinct textures one job brings (a chunk with more takes several jobs)
 typedef struct Job {
-    struct Job* next; int chunk, lod; uint8_t* blob; uint32_t size; int ntex; JobTex tex[32];
+    struct Job* next; int chunk, lod; uint8_t* blob; uint32_t size; int ntex; JobTex tex[JOB_MAX_TEX];
     uint32_t model;                        // game model built by the stream thread (no GPU objects yet)
     int arr;                               // LOD 0 near the glider: keeps its CPU arrays (collision trees need them)
     int stage, texStep; uint32_t vbOff, ibOff; struct ID3D11Buffer* vb; struct ID3D11Buffer* ib;   // main-thread progress
@@ -346,7 +347,7 @@ static PoolTex g_pool[96]; static int g_npool; static uint32_t g_poolBytes, g_te
 
 typedef struct { uint32_t w, h, mips, fmt, bytes; D3D11_SUBRESOURCE_DATA sd[16]; } DdsInfo;
 static int ParseDds(const uint8_t* d, uint32_t n, DdsInfo* di) {
-    uint32_t pf, fourcc, bits, i; int bs = 0; size_t off = 128;
+    uint32_t pf, fourcc, bits, i, sw, sh; int bs = 0; size_t off = 128;
     if (n < 128 || memcmp(d, "DDS ", 4)) return 0;
     memcpy(&di->h, d + 12, 4); memcpy(&di->w, d + 16, 4); memcpy(&di->mips, d + 28, 4); memcpy(&pf, d + 80, 4); memcpy(&fourcc, d + 84, 4); memcpy(&bits, d + 88, 4);
     if (di->mips < 1) di->mips = 1; if (di->mips > 16) di->mips = 16;
@@ -356,9 +357,16 @@ static int ParseDds(const uint8_t* d, uint32_t n, DdsInfo* di) {
         else if (fourcc == 0x35545844) { di->fmt = DXGI_FORMAT_BC3_UNORM; bs = 16; }
         else return 0;
     } else if (bits == 32) di->fmt = DXGI_FORMAT_B8G8R8A8_UNORM; else return 0;
+    // Native D3D11 refuses a BC texture whose top level is not a multiple of 4 wide and high (E_INVALIDARG; DXVK accepts it).
+    // Native landscapes have such textures (1024x942, 2550x1472, ...; and the helper's coarser LODs halve sizes). The data is whole
+    // 4x4 blocks anyway, so the texture is created rounded up to 4: same blocks, same bytes. Lower levels only as long as their
+    // block layout stays the same as the file's.
+    sw = di->w; sh = di->h;
+    if (bs) { di->w = (sw + 3) & ~3u; di->h = (sh + 3) & ~3u; }
     for (i = 0; i < di->mips; i++) {
-        uint32_t mw = di->w >> i, mh = di->h >> i; size_t sz;
-        if (!mw) mw = 1; if (!mh) mh = 1;
+        uint32_t mw = sw >> i, mh = sh >> i, aw = di->w >> i, ah = di->h >> i; size_t sz;
+        if (!mw) mw = 1; if (!mh) mh = 1; if (!aw) aw = 1; if (!ah) ah = 1;
+        if (bs && i > 0 && ((mw + 3) / 4 != (aw + 3) / 4 || (mh + 3) / 4 != (ah + 3) / 4)) { di->mips = i; break; }
         sz = bs ? (size_t)((mw + 3) / 4) * ((mh + 3) / 4) * bs : (size_t)mw * mh * 4;
         if (off + sz > n) { di->mips = i; break; }
         di->sd[i].pSysMem = d + off; di->sd[i].SysMemPitch = bs ? ((mw + 3) / 4) * bs : mw * 4; di->sd[i].SysMemSlicePitch = (UINT)sz;
@@ -369,12 +377,14 @@ static int ParseDds(const uint8_t* d, uint32_t n, DdsInfo* di) {
 }
 static void TexToPool(ID3D11Texture2D* tex, ID3D11ShaderResourceView* srv);
 static int g_texBusy;                      // TexAcquire: nothing done, staging busy
+static char g_texErr[160];                 // TexAcquire: why it failed (when not busy)
 static ID3D11ShaderResourceView* TexAcquire(const uint8_t* d, uint32_t n, ID3D11Texture2D** outTex) {
     DdsInfo di; int i; ID3D11Device* dev = (ID3D11Device*)(uintptr_t)RD(G(VAR_DEVICE));
     ID3D11DeviceContext* ctx = (ID3D11DeviceContext*)(uintptr_t)RD(G(VAR_CONTEXT));
     D3D11_TEXTURE2D_DESC td; ID3D11Texture2D* tex = NULL; ID3D11ShaderResourceView* srv = NULL;
     *outTex = NULL;
-    if (!dev || !ctx || !ParseDds(d, n, &di)) return NULL;
+    if (!dev || !ctx) { g_texBusy = 1; return NULL; }
+    if (!ParseDds(d, n, &di)) { _snprintf(g_texErr, sizeof g_texErr, "not a DDS we can read (%u bytes)", n); return NULL; }
     for (i = g_npool - 1; i >= 0; i--) {
         PoolTex* p = &g_pool[i];
         if (p->w == di.w && p->h == di.h && p->mips == di.mips && p->fmt == di.fmt) {
@@ -390,9 +400,12 @@ static ID3D11ShaderResourceView* TexAcquire(const uint8_t* d, uint32_t n, ID3D11
     td.Width = di.w; td.Height = di.h; td.MipLevels = di.mips; td.ArraySize = 1; td.Format = (DXGI_FORMAT)di.fmt; td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     {   double t0 = Now(), t1, t2;
-        if (FAILED(ID3D11Device_CreateTexture2D(dev, &td, NULL, &tex))) return NULL;
+        HRESULT hr;
+        if (FAILED(hr = ID3D11Device_CreateTexture2D(dev, &td, NULL, &tex))) {
+            _snprintf(g_texErr, sizeof g_texErr, "CreateTexture2D %ux%u, %u mips, format %u: %08lx", di.w, di.h, di.mips, di.fmt, (unsigned long)hr); return NULL; }
         t1 = Now();
-        if (FAILED(ID3D11Device_CreateShaderResourceView(dev, (ID3D11Resource*)tex, NULL, &srv))) { ID3D11Texture2D_Release(tex); return NULL; }
+        if (FAILED(hr = ID3D11Device_CreateShaderResourceView(dev, (ID3D11Resource*)tex, NULL, &srv))) {
+            _snprintf(g_texErr, sizeof g_texErr, "CreateShaderResourceView %ux%u format %u: %08lx", di.w, di.h, di.fmt, (unsigned long)hr); ID3D11Texture2D_Release(tex); return NULL; }
         g_texCreated++;
         if (!UploadTexture(tex, di.w, di.h, di.mips, di.fmt, di.sd)) { TexToPool(tex, srv); g_texBusy = 1; return NULL; }   // filled later
         t2 = Now();
@@ -641,6 +654,10 @@ static int StageJob(Job* j, uint32_t list) {
             g_tf[T_TEX] += Now() - t0;
             if (!t->srv && g_texBusy) return 2;                 // staging textures busy: next frame
             if (t->srv) g_texHave[key] = 1;
+            else {                                               // can never be made: drawn without it, never asked again
+                static int nl; g_texBad[key] = 1;               // (otherwise the chunk is dropped and asked again forever)
+                if (nl++ < 20) ALog("texture %d lod %d: %s: drawn without", p[j->texStep].texture, j->lod, g_texErr);
+            }
             g_fTex++; j->texStep++;
             return 1;
         }
@@ -961,7 +978,7 @@ static DWORD WINAPI StreamThread(LPVOID unused) {
                 g_box[best * 4 + 0] = cxw + mn[0]; g_box[best * 4 + 1] = cyw + mn[1]; g_box[best * 4 + 2] = cxw + mx[0]; g_box[best * 4 + 3] = cyw + mx[1];
                 g_zb[best * 2 + 0] = mn[2]; g_zb[best * 2 + 1] = mx[2];
             }
-            for (i = 0; i < h->n_parts && j->ntex < 32; i++) if (p[i].texture >= 0) {
+            for (i = 0; i < h->n_parts && j->ntex < JOB_MAX_TEX; i++) if (p[i].texture >= 0) {
                 uint32_t key = TexKey(p[i].texture, bestLod); int k, dup = 0;
                 if (g_texHave[key] || g_texBad[key]) continue;
                 for (k = 0; k < j->ntex; k++) dup |= j->tex[k].key == key;
