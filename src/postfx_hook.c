@@ -318,6 +318,54 @@ static int ReadProjection(PfxCamera* cam) {
 
 static void FreezeFrame(void);
 static void DoDump(const char* name);
+// ---- yaw string depth ----------------------------------------------------------------------------------------
+// Avion.Panel.DrawYawstring (FUN_006face8 @ 0x6fb519 and the second path @ 0x6fb649) binds the engine's global
+// "depth disabled" state (*[0x793008] = 0x7da12c: DepthEnable=FALSE) around the yaw string draw (thick lines +
+// tuft mesh). With depth disabled D3D11 also writes no depth, so after the cockpit pass the string's pixels still
+// hold the cleared cockpit depth and the postfx sees the terrain/sky depth behind it: below the horizon the string
+// gets haze, AO and the world grade, above the horizon (sky) it does not.
+// We patch the two `MOV EAX,[0x793008]` operands to point at our own state: depth test ALWAYS (draws over everything,
+// exactly as before) but with depth writes on, so the string leaves its real depth like every other cockpit object.
+#define YAW_SITE1 0x6fb525
+#define YAW_SITE2 0x6fb655
+#define YAW_DSS_PP 0x793008
+static ID3D11DepthStencilState* g_yawDss = NULL;
+static void* g_yawDssAddr = NULL;     // [operand] -> &g_yawDss -> state
+static int g_yawState = 0;            // 0 = not yet, 1 = patched, <0 = failed / unexpected code
+
+static int YawPatchSite(uintptr_t ida, uint32_t expect, uint32_t repl) {
+    uint8_t* a = (uint8_t*)IdaAddrToRuntime(ida);
+    DWORD old;
+    if (IsBadReadPtr(a, 5) || a[0] != 0xA1 || *(uint32_t*)(a + 1) != expect) return 0;
+    if (!VirtualProtect(a, 5, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    *(uint32_t*)(a + 1) = repl;
+    VirtualProtect(a, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), a, 5);
+    return 1;
+}
+
+static void YawstringDepth(uint32_t dev) {
+    D3D11_DEPTH_STENCIL_DESC d;
+    uint32_t pp = (uint32_t)(uintptr_t)IdaAddrToRuntime(YAW_DSS_PP), mine;
+    if (g_yawState || !dev) return;
+    memset(&d, 0, sizeof d);
+    d.DepthEnable = TRUE; d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; d.DepthFunc = D3D11_COMPARISON_ALWAYS;
+    d.StencilEnable = FALSE; d.StencilReadMask = 0xff; d.StencilWriteMask = 0xff;
+    d.FrontFace.StencilFailOp = d.FrontFace.StencilDepthFailOp = d.FrontFace.StencilPassOp = D3D11_STENCIL_OP_KEEP;
+    d.FrontFace.StencilFunc = D3D11_COMPARISON_ALWAYS; d.BackFace = d.FrontFace;
+    if (FAILED(ID3D11Device_CreateDepthStencilState((ID3D11Device*)(uintptr_t)dev, &d, &g_yawDss)) || !g_yawDss) { g_yawState = -1; return; }
+    g_yawDssAddr = &g_yawDss;
+    mine = (uint32_t)(uintptr_t)&g_yawDssAddr;
+    {
+        uint8_t* s1 = (uint8_t*)IdaAddrToRuntime(YAW_SITE1);
+        uint8_t* s2 = (uint8_t*)IdaAddrToRuntime(YAW_SITE2);
+        int ok1 = !IsBadReadPtr(s1, 5) && s1[0] == 0xA1 && *(uint32_t*)(s1 + 1) == pp;
+        int ok2 = !IsBadReadPtr(s2, 5) && s2[0] == 0xA1 && *(uint32_t*)(s2 + 1) == pp;
+        g_yawState = (ok1 && ok2 && YawPatchSite(YAW_SITE1, pp, mine) && YawPatchSite(YAW_SITE2, pp, mine)) ? 1 : -2;
+    }
+    if (g_logf) { fprintf(g_logf, "postfx: yaw string depth write %s\n", g_yawState == 1 ? "patched" : "NOT patched (unexpected code)"); fflush(g_logf); }
+}
+
 static void GotoApply(void); static volatile int g_gotoPending;
 static void HudPre(void* address, DobbyRegisterContext* rc) {
     static int kF8, kF9, kF10;
@@ -341,6 +389,7 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
 
     if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_DEVICE_VAR), &dev) || !dev) { Diag("postfx: no device"); return; }
     if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_CONTEXT_VAR), &ctx) || !ctx) { Diag("postfx: no context"); return; }
+    YawstringDepth(dev);
 
     if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_SWAPMGR_PTR), &p1) || !Rd32(p1, &mgr) || !mgr) { Diag("postfx: no swap manager (p1=%08x)", p1); return; }
     if (!Rd32(mgr + MGR_OFF_INDEX, &idx) || !Rd32(mgr + MGR_OFF_ITEMS, &arr) || !arr) { Diag("postfx: manager layout (mgr=%08x)", mgr); return; }
