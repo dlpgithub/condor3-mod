@@ -43,6 +43,7 @@
 #define FN_MODEL_FREEARR   0x00771458
 #define FN_MODEL_POS       0x00761014
 #define FN_EFFECT          0x00775938
+#define FN_SIM_TEARDOWN    0x006D71D0   // end of a flight: "Free TerrainCacheThread" ... "Free world"
 #define VAR_WORLD          0x00792FD0
 #define VAR_GLIDER         0x00792A64
 #define VAR_LSNAME         0x00793584
@@ -199,7 +200,7 @@ typedef struct Job {
 typedef struct { ID3D11ShaderResourceView* srv; ID3D11Texture2D* tex; int users; unsigned lastUse; } TexEntry;
 
 static C3hClient     g_cl;
-static volatile int  g_state;            // 0 idle, 1 open requested, 2 streaming, -1 failed
+static volatile int  g_state;            // 0 idle, 1 open requested, 2 streaming, 3 flight ending, -1 failed
 static char          g_lsDir[MAX_PATH];
 static C3hLandscape  g_L;
 static C3hChunkInfo* g_info;
@@ -232,7 +233,7 @@ static uint32_t* g_zeroRows; static uint32_t* g_zeroRow; static uint32_t g_zeroF
 static void CacheExecutePre(void* address, DobbyRegisterContext* rc) {
     uint32_t L = Landscape(), tx, ty, i; uintptr_t nm; char name[64];
     (void)address; (void)rc;
-    if (!g_enable || g_state < 0 || !L || !Ok(L + 0x1a4, 8)) return;
+    if (!g_enable || g_state < 0 || g_state == 3 || !L || !Ok(L + 0x1a4, 8)) return;
     if (RD(L + 0x44) == (uint32_t)(uintptr_t)g_zeroRows && g_zeroFor == L) return;      // already switched off for this landscape
     tx = *(uint16_t*)(uintptr_t)(L + 0x1a4); ty = *(uint16_t*)(uintptr_t)(L + 0x1a6);
     nm = RD(G(VAR_LSNAME)) + 0xdc;
@@ -552,8 +553,9 @@ static unsigned g_refLog;
 // out of the game's list by then and our buffer/texture references are already back in the pools.
 #define FREEQ_N 256
 static volatile uint32_t g_freeQ[FREEQ_N]; static volatile LONG g_freeHead, g_freeTail;   // main thread writes head, stream thread tail
+static volatile int g_teardown;           // flight end: everything is freed right away on the main thread
 static int FreeLater(uint32_t m) {
-    if (g_freeHead - g_freeTail >= FREEQ_N) return 0;
+    if (g_teardown || g_freeHead - g_freeTail >= FREEQ_N) return 0;
     g_freeQ[g_freeHead % FREEQ_N] = m; MemoryBarrier(); g_freeHead++;
     return 1;
 }
@@ -912,12 +914,15 @@ static int OpenInHelper(void) {
     return 1;
 }
 
+static volatile LONG g_streamBusy;       // the stream thread is in a round of work (FlightEnd waits for it)
 static DWORD WINAPI StreamThread(LPVOID unused) {
     (void)unused;
     for (;;) {
         int c, best = -1, bestLod = -1; double bestD = 1e30;
+        InterlockedExchange(&g_streamBusy, 0);
         Sleep(g_state == 2 ? 15 : 200);
-        if (g_state == 1) { g_state = OpenInHelper() ? 2 : -1; continue; }
+        InterlockedExchange(&g_streamBusy, 1);                                    // set before the state is read (see AgStream_FlightEnd)
+        if (g_state == 1) { int ok = OpenInHelper(); if (g_state == 1) g_state = ok ? 2 : -1; continue; }
         if (g_state != 2 || !g_haveGlider || !g_haveCam) continue;
         BuildTrees();
         FreeQueued();
@@ -967,6 +972,55 @@ static DWORD WINAPI StreamThread(LPVOID unused) {
     return 0;
 }
 
+// ---- end of a flight ---------------------------------------------------------------------------------------------
+// The game destroys the world, the landscape and the autogen list (with our models in it) when a flight ends. Nothing of ours
+// may point into that afterwards: the next flight would write into freed models (AfterTessPre), free them a second time, and
+// release textures the game's destructors already released with the models. So, at the start of the game's teardown (main
+// thread, world still alive): stop the stream thread, take our models out of the list and free them, release every GPU object
+// of ours and stop the helper (its memory goes back; the next flight starts it again).
+static void FlightEndPre(void* address, DobbyRegisterContext* rc) {
+    uint32_t c; int i; DWORD t0 = GetTickCount(); int st = g_state;
+    (void)address; (void)rc;
+    if (!g_enable || (st == 0 && !g_cl.hd)) return;
+    g_state = 3;                                                               // the stream thread does nothing in state 3
+    MemoryBarrier();
+    while (g_streamBusy && GetTickCount() - t0 < 60000) Sleep(1);      // (an OPEN in progress can take a while)
+    g_teardown = 1;
+    while (g_freeTail != g_freeHead) {                                         // frees the stream thread had not done yet
+        uint32_t m = g_freeQ[g_freeTail % FREEQ_N];
+        DCall(G(FN_MODEL_FREEARR), m, 0, 0); DCall(G(FN_FREE), m, 0, 0);
+        g_freeTail++;
+    }
+    if (g_cur) { JobDrop(g_cur); g_cur = NULL; }
+    for (;;) { Job* j; EnterCriticalSection(&g_qlock); j = g_qhead; if (j) { g_qhead = j->next; if (!g_qhead) g_qtail = NULL; g_qn--; } LeaveCriticalSection(&g_qlock); if (!j) break; JobDrop(j); }
+    g_treeReq = -1; g_treeBusy = -1;
+    if (g_model && g_listPtr && AutoGen() && RD(AutoGen() + 4) == g_listPtr)
+        for (c = 0; c < g_L.n_chunks; c++) if (g_model[c]) FreeModel((int)c);   // out of the game's list, borrowed textures cleared
+    for (c = 0; g_model && c < g_L.n_chunks; c++) {                            // (list already gone: forget them, never touch them)
+        g_model[c] = 0; g_res[c] = -1; g_want[c] = -1; g_pend[c] = -1; g_needArr[c] = 0; g_treeFor[c] = 0;
+        if (g_vb[c]) ID3D11Buffer_Release(g_vb[c]);
+        if (g_ib[c]) ID3D11Buffer_Release(g_ib[c]);
+        g_vb[c] = g_ib[c] = NULL;
+    }
+    for (c = 0; g_tex && c < g_L.n_textures * g_L.n_lods; c++) {
+        if (g_tex[c].srv) { ID3D11ShaderResourceView_Release(g_tex[c].srv); ID3D11Texture2D_Release(g_tex[c].tex); }
+        g_tex[c].srv = NULL; g_tex[c].tex = NULL; g_tex[c].users = 0; g_texHave[c] = 0;
+    }
+    for (i = 0; i < g_npool; i++) { ID3D11ShaderResourceView_Release(g_pool[i].srv); ID3D11Texture2D_Release(g_pool[i].tex); }
+    g_npool = 0; g_poolBytes = 0;
+    for (i = 0; i < g_nbpool; i++) ID3D11Buffer_Release(g_bpool[i].b);
+    g_nbpool = 0; g_bpoolBytes = 0;
+    for (i = 0; i < STAGE_BUF_N; i++) if (g_stageBuf[i]) { ID3D11Buffer_Release(g_stageBuf[i]); g_stageBuf[i] = NULL; }
+    for (i = 0; i < STAGE_TEX_N; i++) if (g_stageTex[i].t) { ID3D11Texture2D_Release(g_stageTex[i].t); memset(&g_stageTex[i], 0, sizeof g_stageTex[i]); }
+    if (g_layout) { ID3D11InputLayout_Release(g_layout); g_layout = NULL; }
+    if (g_cl.hd) C3h_Stop(&g_cl);
+    g_lsDir[0] = 0; g_listPtr = 0; g_lsPtr = 0; g_zeroFor = 0; g_haveGlider = 0; g_haveCam = 0; g_uploads = 0;
+    g_teardown = 0;
+    MemoryBarrier();
+    g_state = 0;
+    ALog("flight end: streamed autogen freed, helper stopped (state was %d, %lu ms)", st, GetTickCount() - t0);
+}
+
 // ---- public ---------------------------------------------------------------------------------------------------
 void AgStream_Stats(void (*out)(const char*, ...)) {
     int c, n[C3H_MAX_LOD + 1] = {0}, t = 0; uint32_t k;
@@ -1008,7 +1062,8 @@ void InstallAgStream(void) {
     r1 = DobbyInstrument(IdaAddrToRuntime(FN_CACHE_EXECUTE), CacheExecutePre);
     r2 = 0;                                                                     // per-frame work: AgStream_FrameTick from the HUD hook
     r3 = DobbyInstrument(IdaAddrToRuntime(FN_AG_AFTERTESS), AfterTessPre);
-    ALog("hooks: cache execute %d, update %d, aftertess %d", r1, r2, r3);
+    r2 = DobbyInstrument(IdaAddrToRuntime(FN_SIM_TEARDOWN), FlightEndPre);
+    ALog("hooks: cache execute %d, flight end %d, aftertess %d", r1, r2, r3);
     if (r1 || r2 || r3) { g_enable = 0; return; }
     CreateThread(NULL, 0, StreamThread, NULL, 0, NULL);
 }
