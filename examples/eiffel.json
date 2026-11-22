@@ -1,0 +1,17 @@
+{
+ "margin_tiles": 1,
+ "texture_size": 8192,
+ "airports": [
+  {
+   "name": "ChampDeMars",
+   "runway": {
+    "from": [48.8568, 2.2967],
+    "to": [48.8541, 2.3005],
+    "width": 30,
+    "surface": "grass"
+   },
+   "frequency": 123.5,
+   "grass": "auto"
+  }
+ ]
+}

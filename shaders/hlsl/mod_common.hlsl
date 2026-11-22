@@ -1,0 +1,156 @@
+// ============================================================================
+// Condor 3 shader mod - shared helpers (inserted by build_shaders.py)
+// ============================================================================
+#define MOD_SATURATION   @saturation@
+#define MOD_AIR_GAMMA    @air_gamma@     // aircraft lighting "gamma control" (the original uses 0.7, which flattens and brightens)
+#define MOD_AIR_GAIN     @air_gain@
+#define MOD_AIR_AMB      @air_amb@       // aircraft ambient light scale (the original ambient is strong: shaded sides stay bright)
+#define MOD_COCKPIT_GAIN @cockpit_gain@  // interior exposure (the real cabin looks darker than the sky outside)
+#define MOD_AIR_FRESNEL  @air_fresnel@   // soft sky reflection on glossy gel-coat at grazing angles
+#define MOD_AIR_REFL     @air_reflect@   // sky reflection (Fresnel) on gel-coat and canopy
+#define MOD_WATER_REFL   @water_reflect@ // sky reflection (Fresnel) on lakes
+#define MOD_KNEE         @knee@          // highlights above this are compressed smoothly instead of clipping (1 = hard clip)
+#define MOD_CLOUD_GAIN   @cloud_gain@
+#define MOD_CURVE        @curve@
+#define MOD_DITHER       @dither@
+#define MOD_MACRO_DETAIL @macro_detail@
+#define MOD_WATER_GLINT  @water_glint@
+#define MOD_SHADOW       @shadow_strength@
+#define MOD_WARM         @warm_sun@
+#define MOD_COOL         @cool_ambient@
+#define MOD_HEMI         @hemi_ambient@
+#define MOD_SUN_GAIN     @sun_gain@
+#define MOD_AMB_GAIN     @amb_gain@
+
+// Warm direct sunlight / cool sky-lit shadows (the original lights everything with one neutral tint).
+float4 ModSun(float4 sun) { return float4(sun.rgb * float3(1.0 + MOD_WARM, 1.0, 1.0 - MOD_WARM * 1.4), sun.a); }
+float4 ModAmb(float4 amb) { return float4(amb.rgb * float3(1.0 - MOD_COOL, 1.0, 1.0 + MOD_COOL * 1.6), amb.a); }
+
+// Gentle colour grade: saturation + a soft S-curve for contrast.
+// Applied to everything that ends up on screen *together* (terrain, sky,
+// clouds, trees, aircraft) so haze and fog colours keep matching each other.
+// Soft shoulder: identity below the knee, then asymptotically approaches 1. Keeps gradients where saturate() flattened them.
+float3 ModSoft(float3 c)
+{
+    c = max(c, 0.0);
+    float k = MOD_KNEE;
+    float3 over = max(c - k, 0.0);
+    return (k >= 0.999) ? saturate(c) : (min(c, k) + (1.0 - k) * (1.0 - exp(-over / max(1.0 - k, 0.001))));
+}
+float4 ModSoft4(float4 c) { return float4(ModSoft(c.rgb), saturate(c.a)); }
+
+// Khronos PBR Neutral style highlight handling: identity below the start, smooth compression above it,
+// and overexposed colour desaturates toward white instead of clipping per channel.
+float3 ModNeutral(float3 c)
+{
+    const float startC = 0.76, desat = 0.15;
+    c = max(c, 0.0);
+    float x = min(c.r, min(c.g, c.b));
+    float offs = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    c -= offs;
+    float peak = max(c.r, max(c.g, c.b));
+    if (peak < startC) return c + offs;
+    float d = 1.0 - startC;
+    float newPeak = 1.0 - d * d / (peak + d - startC);
+    c *= newPeak / peak;
+    float g = 1.0 - 1.0 / (desat * (peak - newPeak) + 1.0);
+    return lerp(c, newPeak.xxx, g) + offs;
+}
+float4 ModNeutral4(float4 c) { return float4(ModNeutral(c.rgb), saturate(c.a)); }
+
+// Aircraft ambient: cool skylight from above, slightly warm ground bounce from below, scaled down for stronger form shading.
+float4 ModAmbAir(float4 amb, float3 n)
+{
+    float h = saturate(n.z * 0.5 + 0.5);
+    float3 tint = lerp(float3(1.08, 1.0, 0.86), float3(0.90, 1.0, 1.14), h);
+    return float4(amb.rgb * tint * MOD_AIR_AMB, amb.a);
+}
+float3 ModFresnel(float3 n, float3 v, float4 amb, float spec, float a, bool cockpit)
+{
+    float f = pow(1.0 - saturate(dot(n, v)), 4.0);
+    return (cockpit || spec <= 0.0) ? float3(0, 0, 0) : f * a * MOD_AIR_FRESNEL * amb.rgb * float3(0.9, 1.1, 1.5);
+}
+
+float3 ModGrade(float3 c)
+{
+    c = saturate(c);
+    float l = dot(c, float3(0.299, 0.587, 0.114));
+    c = saturate(lerp(float3(l, l, l), c, MOD_SATURATION));
+    float3 s = c * c * (3.0 - 2.0 * c);
+    return lerp(c, s, MOD_CURVE);
+}
+
+float4 ModGradeA(float4 c)
+{
+    return float4(ModGrade(c.rgb), c.a);
+}
+
+// Interleaved-gradient noise, +-0.5 LSB. Removes banding in sky gradients.
+float ModDither(float2 p)
+{
+    return (frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715)))) - 0.5) * (MOD_DITHER / 255.0);
+}
+
+// The game's own sky / haze colour formula (identical maths to the original),
+// but usable per pixel. Also guards acos() against |x| > 1 rounding.
+float3 ModSkyColor(float3 look, float3 fogColor, float3 sunColor, float3 sunPos)
+{
+    float h = max(look.z, 0);
+    float3 baseColor = float3(fogColor.x / (4.0 * h + 1.0),
+                              fogColor.y / (1.8 * h + 1.0),
+                              fogColor.z / (0.5 * h + 1.0));
+    float ang  = acos(clamp(dot(sunPos, look), -1.0, 1.0));
+    float angZ = max(look.z - sunPos.z, 0);
+    float f = exp(-2.0 * (0.1 + 0.9 * ang) * (0.5 + 0.5 * sunPos.z) - angZ * (1.0 - sqrt(max(sunPos.z, 0))));
+    return baseColor + f * (sunColor - baseColor);
+}
+
+
+// Terrain version with live parameters (written into spare constant-buffer bytes by the d3dx.dll hook from tune.txt):
+//   hemiK : sky/ground ambient split (0 = flat ambient), sunG / ambG : light gains, directK : shadow term for the direct light.
+// The result goes through the PBR-Neutral shoulder instead of clipping, so a strong sun can be used without burning out.
+float3 ModLitL(float3 tex, float4 sunC, float4 ambC, float sundot, float3 n, float directK, float hemiK, float sunG, float ambG)
+{
+    float3 a  = pow(saturate(tex), 2.2);
+    float3 sl = pow(saturate(sunC.rgb), 2.2) * sunG;
+    float3 al = pow(saturate(ambC.rgb), 2.2) * ambG;
+    float hemi = saturate(n.z * 0.5 + 0.5);
+    float3 skyA = al * float3(0.92, 1.0, 1.14);
+    float3 gndA = al * float3(0.50, 0.46, 0.40);
+    float3 amb = lerp(al, lerp(gndA, skyA, hemi) * 1.25, hemiK);
+    float3 c = a * (sl * saturate(sundot) * directK + amb);
+    return ModNeutral(pow(max(c, 0.0), 1.0 / 2.2));
+}
+
+// Lighting in linear space with a sky/ground hemisphere ambient.
+//   tex      : albedo as stored (sRGB-ish), n : surface normal (z up), sundot : N.L (signed),
+//   directK  : 0..1 factor applied to the DIRECT light only (shadows); ambient is never shadowed.
+// Returns display-space (gamma encoded) colour.
+float3 ModLit(float3 tex, float4 sunC, float4 ambC, float sundot, float3 n, float directK)
+{
+    float3 a  = pow(saturate(tex), 2.2);
+    float3 sl = pow(saturate(sunC.rgb), 2.2) * MOD_SUN_GAIN;
+    float3 al = pow(saturate(ambC.rgb), 2.2) * MOD_AMB_GAIN;
+    float hemi = saturate(n.z * 0.5 + 0.5);
+    float3 skyA = al * float3(0.92, 1.0, 1.14);
+    float3 gndA = al * float3(0.50, 0.46, 0.40);
+    float3 amb = lerp(al, lerp(gndA, skyA, hemi) * 1.25, MOD_HEMI);
+    float3 c = a * (sl * saturate(sundot) * directK + amb);
+    return ModNeutral(pow(max(c, 0.0), 1.0 / 2.2));
+}
+
+// Sky reflection for glossy aircraft surfaces (Schlick Fresnel, F0 = 0.04). n, v, lightDir in the same (world) space, z = up.
+float3 ModSkyRefl(float3 r, float3 lightDir, float4 lightColor, float4 fogColor)
+{
+    float3 sky = ModSkyColor(r, fogColor.rgb, lightColor.rgb, normalize(-lightDir));
+    float up = smoothstep(-0.15, 0.10, r.z);
+    return lerp(fogColor.rgb * 0.35, sky, up);
+}
+float3 ModAirReflect(float3 n, float3 v, float3 lightDir, float4 lightColor, float4 fogColor, float spec, float a, bool cockpit)
+{
+    if (cockpit || spec <= 0.0) return float3(0, 0, 0);
+    float nv = saturate(dot(n, v));
+    float f = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
+    float3 r = 2.0 * nv * n - v;
+    return ModSkyRefl(r, lightDir, lightColor, fogColor) * (f * a * MOD_AIR_REFL * saturate(spec * 2.0));
+}

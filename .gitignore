@@ -1,3 +1,18 @@
 **/.DS_Store
 build/
 deps/
+# post-fx test frames / renders
+postfx/test/*.bin
+postfx/test/*.bmp
+postfx/test/*.png
+deps/
+shots/
+luts_candidates/
+postfx/test/ref/
+.venv/
+__pycache__/
+rust/tiles2condor/target/
+rust/tiles2condor_v2/target/
+bin/
+docs/img/
+dist/

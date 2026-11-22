@@ -2,3 +2,7 @@
 	path = external/dobby-fork
 	url = https://github.com/trueToastedCode/dobby-fork.git
 	branch = windows
+[submodule "external/condor3-helper"]
+	path = external/condor3-helper
+	url = https://github.com/trueToastedCode/condor3-helper.git
+	branch = main

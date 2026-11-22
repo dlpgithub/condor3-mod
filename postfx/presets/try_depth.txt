@@ -1,0 +1,4 @@
+# suggested starting point: layered blue distance + sun-side haze glow (copy to <game>/postfx/tune.txt, or: scripts/tune.sh haze_blue 0.8 ...)
+haze_blue 0.8
+haze_sun_glow 0.6
+haze_scale 1.4

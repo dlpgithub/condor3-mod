@@ -1,0 +1,283 @@
+"""
+Shader patches for Condor 3.
+
+Every patch is an exact text replacement against the game's own HLSL (decoded
+from Effects/*.fxc). If Condor ever ships a different shader, the replacement
+count check fails loudly instead of silently producing a broken effect.
+
+Interfaces that the game binds by name (cbuffer variables, textures, techniques)
+are never renamed or removed, only the shader *bodies* change.
+"""
+import re
+
+
+class PatchError(Exception):
+    pass
+
+
+def rep(src, old, new, count=1, what=""):
+    n = src.count(old)
+    if n != count:
+        raise PatchError("%s: expected %d match(es) of %r, found %d"
+                         % (what or "patch", count, old[:70], n))
+    return src.replace(old, new)
+
+
+def rep_re(src, pattern, repl, count=1, what="", flags=re.S):
+    found = len(re.findall(pattern, src, flags))
+    if found != count:
+        raise PatchError("%s: expected %d regex match(es) of %r, found %d"
+                         % (what or "patch", count, pattern[:70], found))
+    return re.sub(pattern, repl, src, flags=flags)
+
+
+def wrap_returns(src, pattern, count, what):
+    """return <expr>;  ->  return ModGradeA(<expr>);   for every match."""
+    return rep_re(src, pattern, lambda m: "return ModGradeA(%s);" % m.group(1),
+                  count=count, what=what)
+
+
+# --------------------------------------------------------------------------
+# Terrain
+# --------------------------------------------------------------------------
+def patch_land(src, o):
+    if o["anisotropy"] > 1:
+        src = rep(src, "Filter = ANISOTROPIC;",
+                  "Filter = ANISOTROPIC;\n    MaxAnisotropy = %d;" % o["anisotropy"],
+                  count=3, what="Land: anisotropy")
+
+    if o["macro_detail"] > 0:
+        # The detail texture repeats 30x per tile, which shows as a visible grid
+        # from altitude. Add a second, low-frequency pass at an irrational scale.
+        old = "TextureColor = TextureColor * (DetailColor + 0.5);"
+        new = (old + "\n"
+               "\t// [MOD] low-frequency detail pass: breaks up visible tiling\n"
+               "\tTextureColor.rgb *= lerp(1.0, txDetail.Sample( samLinearWrap, TexDetail * 0.137 + float2(0.37, 0.61) ).r + 0.5, MOD_MACRO_DETAIL);")
+        src = rep(src, old, new, what="Land: macro detail")
+
+    if o["water_glint"] > 0:
+        old = ("TextureColor += (1 - TextureColor.a) * ((0.7 * pow( saturate(dot(Rs, V)), 16)) "
+               "+ 0.5 * pow(1 - dot(RSky, V), 16));")
+        new = ("float ModWater = 1 - TextureColor.a;\n"
+               "\t  " + old + "\n"
+               "\t  // [MOD] sharp, sun-tinted glitter on top of the broad highlight\n"
+               "\t  TextureColor.rgb += ModWater * MOD_WATER_GLINT * lerp(float3(1, 1, 1), SunColor.rgb, 0.6) * pow(saturate(dot(Rs, V)), 160);\n"
+               "\t  // [MOD] Fresnel sky reflection: lakes mirror the sky at shallow view angles\n"
+               "\t  float3 ModWN = normalize(float3(0.35 * WaterBumpMapColor.x, 0.35 * WaterBumpMapColor.y, 1));\n"
+               "\t  float3 ModWR = reflect(-V, ModWN); ModWR.z = abs(ModWR.z);\n"
+               "\t  float ModWF = 0.03 + 0.97 * pow(1 - saturate(dot(ModWN, V)), 5);\n"
+               "\t  float3 ModWSky = ModSkyColor(normalize(ModWR), FogColor.xyz, SunColor.xyz, SunPos);\n"
+               "\t  TextureColor.rgb = lerp(TextureColor.rgb, ModWSky, saturate(ModWF * MOD_WATER_REFL) * ModWater);")
+        src = rep(src, old, new, what="Land: water glint")
+
+    if o.get("soft_shadow", False):
+        # single-tap shadow lookup gives hard, blocky edges and dark triangles on slopes: use the game's own 16-tap filter
+        src = rep(src, "shadowFactor = getShadowFactor(input.lpos, txDiffuseShadow, false);",
+                  "shadowFactor = getShadowFactor(input.lpos, txDiffuseShadow, true);", what="Land: soft self shadow")
+
+    # [MOD] stronger shadows + warm sun / cool ambient
+    live = bool(o.get("linear_light", 0))
+    if live:
+        # spare bytes of the per-frame constant buffer carry live parameters (written by the d3dx.dll hook from tune.txt)
+        src = rep(src, "  float3 CameraPos;\n", "  float3 CameraPos;\n  float ModP3; // live: ambient gain\n", what="Land: cbuffer P3")
+        src = rep(src, "  float3 SunPos;\n", "  float3 SunPos;\n  float ModP4; // live: cloud shadow strength\n", what="Land: cbuffer P4")
+        src = rep(src, "  float4 AmbientColor;\n  float Time;\n",
+                  "  float4 AmbientColor;\n  float Time;\n  float ModP0; // live: terrain/aircraft shadow strength\n  float ModP1; // live: hemisphere ambient\n  float ModP2; // live: sun gain\n",
+                  what="Land: cbuffer P0-2")
+        src = rep(src, "float TotalShadow = 0.6 + 0.4 * min(min(min(CloudShadow, shadowFactor), shadowFactorAvion), shadowFactorTowplane);",
+                  "float ModS = min(min(shadowFactor, shadowFactorAvion), shadowFactorTowplane);\n\tfloat TotalShadow = ((1.0 - ModP0) + ModP0 * ModS) * ((1.0 - ModP4) + ModP4 * CloudShadow);\n\tfloat3 ModN = (RealtimeShading == true) ? normalize(input.Norm) : float3(0, 0, 1);",
+                  what="Land: shadow (live)")
+    else:
+        src = rep(src, "float TotalShadow = 0.6 + 0.4 * min(min(min(CloudShadow, shadowFactor), shadowFactorAvion), shadowFactorTowplane);",
+                  "float ModS = min(min(min(CloudShadow, shadowFactor), shadowFactorAvion), shadowFactorTowplane);\n\tfloat TotalShadow = (1.0 - MOD_SHADOW) + MOD_SHADOW * ModS;\n\tfloat3 ModN = (RealtimeShading == true) ? normalize(input.Norm) : float3(0, 0, 1);", what="Land: shadow")
+    src = rep(src, "float4 LightingColor = saturate(SunColor * sundot + AmbientColor);",
+              "float4 LightingColor = saturate(ModSun(SunColor) * sundot + ModAmb(AmbientColor));", what="Land: light tint")
+
+    old = "return lerp(input.SkyColor, saturate(LightingColor * TotalShadow * TextureColor), input.fogFactor);"
+    if o["per_pixel_atmosphere"]:
+        new = (
+            "// [MOD] per-pixel fog + haze colour (the original interpolates both between\n"
+            "\t// the far-apart vertices of big terrain triangles, which looks blotchy)\n"
+            "\tfloat3 ModLook = input.WorldPos - CameraPos;\n"
+            "\tfloat ModFog = 1.0;\n"
+            "\tif (MapView == false)\n"
+            "\t  { ModFog = saturate(1.1 * exp(-0.000000001 * dot(ModLook, ModLook)) - 0.1); }\n"
+            "\tfloat3 ModSky = ModSkyColor(normalize(ModLook), FogColor.xyz, SunColor.xyz, SunPos);\n"
+            "\tfloat4 ModOut = lerp(float4(ModSky, 0), LITEXPR, ModFog);\n"
+            "\tModOut.rgb = ModGrade(ModOut.rgb) + ModDither(input.Pos.xy);\n"
+            "\treturn ModOut;")
+    else:
+        new = "return ModGradeA(%s);" % old[len("return "):-1]
+    if o.get("linear_light", 0):
+        lit = "float4(ModLitL(TextureColor.rgb, ModSun(SunColor), ModAmb(AmbientColor), sundot, ModN, TotalShadow, ModP1, ModP2, ModP3), 1)"
+    else:
+        lit = "saturate(LightingColor * TotalShadow * TextureColor)"
+    new = new.replace("LITEXPR", lit)
+    return rep(src, old, new, what="Land: final colour")
+
+
+# --------------------------------------------------------------------------
+# Sky dome
+# --------------------------------------------------------------------------
+def patch_sky(src, o):
+    old_ret = "return input.Color;"
+    if o["per_pixel_atmosphere"]:
+        src = rep(src, "float4 Pos : SV_POSITION;",
+                  "float4 Pos : SV_POSITION;\n    float3 ModLook : TEXCOORD0;", what="Sky: struct")
+        src = rep(src, "float3 LookVec = normalize(input.Pos.xyz - CameraPos);",
+                  "float3 LookVec = normalize(input.Pos.xyz - CameraPos);\n"
+                  "\toutput.ModLook = LookVec;", what="Sky: VS")
+        new = ("// [MOD] per-pixel sky: no vertex interpolation artefacts around the sun, no banding\n"
+               "  float3 ModSky = ModSkyColor(normalize(input.ModLook), FogColor.xyz, SunColor.xyz, SunPos);\n"
+               "  return float4(ModGrade(ModSky) + ModDither(input.Pos.xy), input.Color.a);")
+    else:
+        new = "return ModGradeA(input.Color);"
+    return rep(src, old_ret, new, what="Sky: PS")
+
+
+# --------------------------------------------------------------------------
+# Trees / forests
+# --------------------------------------------------------------------------
+def patch_autoobjects(src, o):
+    src = rep(src, "float TotalShadow = 0.6 + 0.4 * min(CloudShadow, shadowFactor);",
+              "float TotalShadow = (1.0 - MOD_SHADOW) + MOD_SHADOW * min(CloudShadow, shadowFactor);", what="AutoObjects: shadow")
+    src = rep(src, "saturate(SunExposure * SunColor * TexColor", "saturate(SunExposure * ModSun(SunColor) * TexColor", what="AutoObjects: tint")
+    if o.get("linear_light", 0):
+        src = rep(src, "float4 FinalColor = saturate(SunExposure * ModSun(SunColor) * TexColor * (0.8 + 0.3 * input.Random));",
+                  "float4 FinalColor = float4(ModLit(TexColor.rgb * (0.8 + 0.3 * input.Random), ModSun(SunColor), float4(FogColor.rgb * 0.45, 1), saturate(0.2 + 0.8 * sundot), normalize(input.Normal.xyz), TotalShadow), 1);",
+                  what="AutoObjects: linear light")
+    if o["unify_tree_haze"]:
+        # Trees used a different haze formula than terrain and sky, so distant
+        # forests faded to a slightly different colour than the ground behind.
+        src = rep_re(src,
+                     r"float Red = FogColor\.x / \(3 \* fHeight \+ 1\);.*?"
+                     r"output\.SkyColor\.b = Blue \+ dAngleFactor \* \(SunColor\.z - Blue\);",
+                     lambda m: "// [MOD] same haze as terrain and sky\n"
+                               "\toutput.SkyColor.rgb = ModSkyColor(LookVec, FogColor.xyz, SunColor.xyz, SunPos);",
+                     what="AutoObjects: haze")
+    return rep(src, "return lerp(input.SkyColor, FinalColor, input.fogFactor);",
+               "return ModGradeA(lerp(input.SkyColor, FinalColor, input.fogFactor));",
+               what="AutoObjects: grade")
+
+
+# --------------------------------------------------------------------------
+# Grass
+# --------------------------------------------------------------------------
+def patch_grass(src, o):
+    src = rep(src, "float TotalShadow = 0.6 + 0.4 * min(input.CloudShadow, shadowFactor);",
+              "float TotalShadow = (1.0 - MOD_SHADOW) + MOD_SHADOW * min(input.CloudShadow, shadowFactor);", what="Grass: shadow")
+    src = rep(src, "float4 LightingColor = saturate(SunColor * sundot + AmbientColor);",
+              "float4 LightingColor = saturate(ModSun(SunColor) * sundot + ModAmb(AmbientColor));", what="Grass: light tint")
+    if o.get("linear_light", 0):
+        src = rep(src, "float4 OutputColor = float4(input.Color.rgb * (TexColor.rgb + 0.5) * LightingColor * TotalShadow, TexColor.a);",
+                  "float4 OutputColor = float4(ModLit(input.Color.rgb * (TexColor.rgb + 0.5), ModSun(SunColor), ModAmb(AmbientColor), sundot, float3(0, 0, 1), TotalShadow), TexColor.a);",
+                  what="Grass: linear light")
+    if o.get("soft_shadow", False):
+        src = rep(src, "getShadowFactor(input.lpos, txDiffuseShadowAvion, false)", "getShadowFactor(input.lpos, txDiffuseShadowAvion, true)", what="Grass: soft shadow 1")
+        src = rep(src, "getShadowFactor(input.lpos1, txDiffuseShadowTowplane, false)", "getShadowFactor(input.lpos1, txDiffuseShadowTowplane, true)", what="Grass: soft shadow 2")
+    return rep(src, "return OutputColor;", "return ModGradeA(OutputColor);", what="Grass: grade")
+
+
+# --------------------------------------------------------------------------
+# Clouds
+# --------------------------------------------------------------------------
+def patch_cloud(src, o):
+    if o["cloud_linear_filter"]:
+        # Cloud puffs are 256x256 sprites sampled with POINT filtering: blocky up
+        # close and shimmering far away. Trilinear fixes both.
+        src = rep(src, "Filter = MIN_MAG_MIP_POINT;", "Filter = MIN_MAG_MIP_LINEAR;",
+                  what="Cloud: filter")
+    shade = o.get("cloud_shade", 0.0)
+    silver = o.get("cloud_silver", 0.0)
+    if shade > 0 or silver > 0:
+        # Cloud puffs: darker undersides / shaded cores, bright thin rims when the
+        # camera looks toward the sun (silver lining, forward scattering).
+        src = rep(src, "LightingColor = saturate(SunColor * lightIntensity + AmbientColor + 0.5 * glare);",
+                  "float3 ModNU = normalize(input.NormUp);\n"
+                  "\t\tfloat ModUp = saturate(ModNU.z * 0.5 + 0.5);\n"
+                  "\t\tfloat ModShade = lerp(1.0 - %.3f, 1.0, ModUp);\n"
+                  "\t\tfloat ModThin = saturate(1.0 - 1.6 * TextureColor.a);\n"
+                  "\t\tfloat ModFwd = exp(-4.0 * input.dAngle) * (0.4 + 0.6 * saturate(1.0 - ModNU.z * ModNU.z));\n"
+                  "\t\tLightingColor = ModSoft4(MOD_CLOUD_GAIN * (ModSun(SunColor) * lightIntensity * ModShade + ModAmb(AmbientColor) * lerp(ModShade, 1.0, 0.5) + 0.5 * glare + %.3f * ModFwd * ModThin * SunColor));"
+                  % (shade, silver), what="Cloud: lighting")
+    return wrap_returns(src, r"return (lerp\([^;]*\));", 2, "Cloud: grade")
+
+
+def patch_middle_clouds(src, o):
+    return wrap_returns(src, r"return (lerp\(float4\(input\.SkyColor\.xyz, color\.a\), color, input\.fogFactor\));",
+                        2, "MiddleClouds: grade")
+
+
+def patch_high_clouds(src, o):
+    if o["anisotropy"] > 1:
+        src = rep(src, "Filter = ANISOTROPIC;",
+                  "Filter = ANISOTROPIC;\n    MaxAnisotropy = %d;" % o["anisotropy"],
+                  what="HighClouds: anisotropy")
+    return wrap_returns(src, r"return (txDiffuse\.Sample\( samLinear, input\.Tex \) \* float4\(SunColor\.xyz, Alpha\));",
+                        1, "HighClouds: grade")
+
+
+# --------------------------------------------------------------------------
+# Aircraft, airports, ground objects
+# --------------------------------------------------------------------------
+def patch_aircraft(src, o):
+    if o["anisotropy"] > 1:
+        src = rep(src, "Filter = ANISOTROPIC;",
+                  "Filter = ANISOTROPIC;\n    MaxAnisotropy = %d;" % o["anisotropy"],
+                  count=2, what="Aircraft: anisotropy")
+    # PS, PS_SampleShadowMap, PS_Canopy
+    if o.get("aircraft_lighting", False):
+        # lighting "gamma control" 0.7 brightens/flattens everything; hard saturate() flattens lit white surfaces
+        src = rep(src, "float4 LightingColor = pow(selfIllumination",
+                  "float4 LightingColor = MOD_AIR_GAIN * lerp(CockpitView ? MOD_COCKPIT_GAIN : 1.0, 1.0, selfIllumination) * pow(selfIllumination",
+                  count=2, what="Aircraft: light gain")
+        src = rep(src, "float4 LightingColor = pow(ShadeFactor", "float4 LightingColor = MOD_AIR_GAIN * pow(ShadeFactor", what="Aircraft: canopy gain")
+        src = rep(src, "AmbientColor * ambientIntensity),", "ModAmbAir(AmbientColor, N) * ambientIntensity),", what="Aircraft: ambient")
+        src = rep(src, "AmbientColor * ambientIntensityAO),", "ModAmbAir(AmbientColor, N) * ambientIntensityAO),", what="Aircraft: ambient AO")
+        src = rep(src, "\t// Specular lighting\n\tif (SpecularStrength > 0)",
+                  "\tOutputColor.rgb += ModFresnel(N, V, AmbientColor, SpecularStrength, TextureColor.a, CockpitView);\n\t// Specular lighting\n\tif (SpecularStrength > 0)",
+                  count=2, what="Aircraft: fresnel")
+        src = rep(src, ", 0.7); // 0.7 is a sort of GAMMA control", ", MOD_AIR_GAMMA);", count=3, what="Aircraft: light gamma")
+        src = rep(src, "float4 OutputColor = saturate(LightingColor * saturate(MaterialColor) * TextureColor);",
+                  "float4 OutputColor = ModSoft4(LightingColor * saturate(MaterialColor) * TextureColor);", count=2, what="Aircraft: soft lit colour")
+        src = rep(src, "return saturate(OutputColor);", "return ModGradeA(ModSoft4(OutputColor));",
+                  count=3, what="Aircraft: grade (aircraft/canopy)")
+    elif o.get("aircraft_neutral", False):
+        # let lit colour exceed 1 and compress it once at the end (PBR-Neutral shoulder) instead of two hard clips
+        src = rep(src, "float4 OutputColor = saturate(LightingColor * saturate(MaterialColor) * TextureColor);",
+                  "float4 OutputColor = LightingColor * saturate(MaterialColor) * TextureColor;", count=2, what="Aircraft: unclamped lit colour")
+        src = rep(src, "return saturate(OutputColor);", "return ModGradeA(ModNeutral4(OutputColor));",
+                  count=3, what="Aircraft: neutral shoulder")
+        if o.get("aircraft_reflect", 0.0) > 0:
+            src = rep(src, "\t// Specular lighting\n\tif (SpecularStrength > 0)",
+                      "\tOutputColor.rgb += ModAirReflect(N, V, LightDir, LightColor, FogColor, SpecularStrength, TextureColor.a, CockpitView);\n\t// Specular lighting\n\tif (SpecularStrength > 0)",
+                      count=2, what="Aircraft: sky reflection")
+            src = rep(src, "OutputColor.a = pow((1 - Dot), 1.0) * MaterialColor.a * TextureColor.a * (0.5 + 0.5 * ShadeFactor) * (0.5 + 0.5 * shadowFactor);",
+                      "OutputColor.a = pow((1 - Dot), 1.0) * MaterialColor.a * TextureColor.a * (0.5 + 0.5 * ShadeFactor) * (0.5 + 0.5 * shadowFactor);\n"
+                      "\t// [MOD] glass mirrors the sky at grazing angles\n"
+                      "\tfloat ModCF = 0.06 + 0.94 * pow(1.0 - saturate(Dot), 4.0);\n"
+                      "\tfloat3 ModCR = 2.0 * saturate(Dot) * N - V;\n"
+                      "\tfloat ModCW = CockpitView ? 0.0 : saturate(ModCF * MOD_AIR_REFL * 1.2);\n"
+                      "\tOutputColor.rgb = lerp(OutputColor.rgb, ModSkyRefl(ModCR, LightDir, LightColor, FogColor), ModCW);\n"
+                      "\tOutputColor.a = saturate(OutputColor.a + ModCW * (1.0 - OutputColor.a));",
+                      what="Aircraft: canopy reflection")
+    else:
+        src = rep(src, "return saturate(OutputColor);", "return ModGradeA(saturate(OutputColor));",
+                  count=3, what="Aircraft: grade (aircraft/canopy)")
+    # PS_AirportSurface_SampleShadowMap, PS_GroundObject (after their fog lerp)
+    src = rep(src, "return OutputColor;", "return ModGradeA(OutputColor);",
+              count=2, what="Aircraft: grade (airport/ground objects)")
+    return src
+
+
+# file name (without extension) -> patch function
+PATCHES = {
+    "EffectLand":         patch_land,
+    "EffectSky":          patch_sky,
+    "EffectAutoObjects":  patch_autoobjects,
+    "EffectGrass":        patch_grass,
+    "EffectCloud":        patch_cloud,
+    "EffectMiddleClouds": patch_middle_clouds,
+    "EffectHighClouds":   patch_high_clouds,
+    "EffectDX11File":     patch_aircraft,
+}
