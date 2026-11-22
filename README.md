@@ -22,6 +22,7 @@ You only need part 3 if you want to make your own landscapes.
 | file / folder | what it is |
 |---|---|
 | `README.md` | this file |
+| `README_POSTFX.md` | technical notes on the picture effects and the full [remote control](README_POSTFX.md#remote-control) reference |
 | `VERSION.txt` | which version this is, for which platform the compiler is |
 | `build/d3dx.dll` | the mod. It replaces Condor's own `d3dx.dll` (the original is backed up as `d3dx.dll.before_postfx`) |
 | `build/c3helper.exe` | the autogen helper (64-bit). Without it the mod leaves autogen to Condor as usual |
@@ -66,6 +67,10 @@ Then start Condor as usual. The installer copies `d3dx.dll`, `c3helper.exe`, the
 | F10 | capture a frame (for debugging) |
 | Ctrl+Shift+F | freeze the glider in place (look around, take screenshots); again to continue flying |
 | Ctrl+Shift+D | save the current position into `<Condor>\postfx\positions.txt` |
+
+**Remote control:** the mod can also be driven by text commands (freeze the glider, jump to saved spots, free camera, effect on/off,
+statistics), for example for exact comparison screenshots or automated tests: write them into `<Condor>\postfx\cmd.txt`, results go
+to `postfx.log`. All commands are documented in [README_POSTFX.md - Remote control](README_POSTFX.md#remote-control).
 
 **Large landscapes:** the 3D buildings appear a little after the flight starts (the helper reads the landscape first: about half a
 minute for a whole city, longer the first time after a reboot when the disk is cold). The terrain and photo are there at once.

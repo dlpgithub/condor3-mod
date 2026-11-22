@@ -64,7 +64,8 @@ rm -rf "$OUT" "$OUT.zip"; mkdir -p "$OUT"
 
 # ---- collect (same layout as the repository, so the install scripts work unchanged) ----------------------------------------
 put() { mkdir -p "$OUT/$(dirname "$2")"; cp "$1" "$OUT/$2"; }
-put README_RELEASE.md                    README.md
+put README.md                           README.md
+put README_POSTFX.md                    README_POSTFX.md
 put build/d3dx.dll                       build/d3dx.dll
 put build/c3helper.exe                   build/c3helper.exe
 put postfx/postfx.hlsl                   postfx/postfx.hlsl
