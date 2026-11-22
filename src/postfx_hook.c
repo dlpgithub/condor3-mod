@@ -387,12 +387,13 @@ static int OvEnsure(ID3D11Device* dev, UINT w, UINT h, DXGI_SAMPLE_DESC sd) {
 // d3d11.dll", the game shut down; DXVK tolerated it). So: when the game's device is not the one our objects were made on, they are
 // all released and made again on demand. Our objects hold references to the old device, so the new one never has its address.
 static ID3D11Device* g_objDev = NULL;      // device of our objects (not referenced; only compared)
+static void DssCloneRelease(void);
 static int DeviceCheck(ID3D11Device* dev) {   // render thread; 1 = changed (everything released)
     if (!dev || dev == g_objDev) return 0;
     if (!g_objDev) { g_objDev = dev; return 0; }
     if (g_logf) { fprintf(g_logf, "postfx: new D3D11 device %p (was %p): our objects released, made again\n", (void*)dev, (void*)g_objDev); fflush(g_logf); }
     if (g_core) { PfxCore_Destroy(g_core); g_core = NULL; }
-    OvRelease(); g_ovDrawn = 0;
+    OvRelease(); g_ovDrawn = 0; DssCloneRelease();
     if (g_worldCopy) { ID3D11Texture2D_Release(g_worldCopy); g_worldCopy = NULL; }
     g_mainDepth = NULL; g_worldValid = 0; g_clearsThisFrame = 0; g_copiesThisFrame = 0;
     g_objDev = dev;
@@ -455,8 +456,69 @@ static int YawPatchCall(uintptr_t ida) {
     FlushInstructionCache(GetCurrentProcess(), a, 5);
     return 1;
 }
+// ---- translucent cockpit parts: no depth ------------------------------------------------------------------------
+// The model draw FUN_00772688 draws a model's opaque parts, then (local pass = 1, from 0x772929) its translucent parts (material
+// alpha < 1, part+0x144) with the alpha blend state but the depth state unchanged: in the cockpit pass that is the default state
+// with depth writes on. So glass like the clear-view window ("DV Panel", alpha 0.2) and the PDA glass write cockpit depth, the
+// final pass takes the landscape seen through them for cockpit interior and grades it without haze, sky and AO. In the cockpit
+// pass (after the cockpit depth clear) and while the effect is on, their loop runs with a copy of the bound depth state without
+// depth writes (the depth test stays: glass behind cockpit parts stays hidden); the game's state is put back when the function
+// returns (0x772e85). Not in the world pass: there a canopy without depth would let clouds drawn later appear in front of it.
+#define ADDR_MODEL_TRANSLUCENT 0x772929
+#define ADDR_MODEL_DRAW_EXIT   0x772e85
+typedef struct { ID3D11DepthStencilState* src; ID3D11DepthStencilState* noWrite; } DssClone;
+static DssClone g_dssClone[8]; static int g_nDssClone;
+static ID3D11DepthStencilState* g_dssSaved; static UINT g_dssSavedRef; static int g_dssSwapped;
+static void DssCloneRelease(void) { int i; for (i = 0; i < g_nDssClone; i++) { REL(g_dssClone[i].noWrite); REL(g_dssClone[i].src); } g_nDssClone = 0; }
+static void TranslucentPre(void* address, DobbyRegisterContext* rc) {
+    uint32_t ctxp = 0; ID3D11DeviceContext* x; ID3D11DepthStencilState* cur = NULL; ID3D11DepthStencilState* nw = NULL; UINT ref = 0; int i;
+    (void)address; (void)rc;
+    if (g_dssSwapped || !g_enabled || g_dead || g_clearsThisFrame < 2) return;       // cockpit pass only (2nd clear of the main depth)
+    if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_CONTEXT_VAR), &ctxp) || !ctxp) return;
+    x = (ID3D11DeviceContext*)(uintptr_t)ctxp;
+    ID3D11DeviceContext_OMGetDepthStencilState(x, &cur, &ref);
+    if (!cur) return;
+    for (i = 0; i < g_nDssClone && !nw; i++) if (g_dssClone[i].src == cur) nw = g_dssClone[i].noWrite;
+    if (!nw && i == g_nDssClone) {
+        D3D11_DEPTH_STENCIL_DESC dd; ID3D11Device* dev = NULL;
+        ID3D11DepthStencilState_GetDesc(cur, &dd);
+        if (dd.DepthEnable && dd.DepthWriteMask != D3D11_DEPTH_WRITE_MASK_ZERO && g_nDssClone < 8) {
+            ID3D11DeviceContext_GetDevice(x, &dev);
+            dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+            if (dev && SUCCEEDED(ID3D11Device_CreateDepthStencilState(dev, &dd, &nw))) {
+                ID3D11DepthStencilState_AddRef(cur);
+                g_dssClone[g_nDssClone].src = cur; g_dssClone[g_nDssClone].noWrite = nw; g_nDssClone++;
+                if (g_logf) { fprintf(g_logf, "postfx: translucent cockpit parts: depth state %p without depth writes\n", (void*)cur); fflush(g_logf); }
+            }
+            REL(dev);
+        }
+    }
+    if (!nw) { ID3D11DepthStencilState_Release(cur); return; }                    // depth writes off already, or no copy
+    g_dssSaved = cur; g_dssSavedRef = ref; g_dssSwapped = 1;                        // keeps the reference from OMGet
+    ID3D11DeviceContext_OMSetDepthStencilState(x, nw, ref);
+}
+static void ModelDrawExitPre(void* address, DobbyRegisterContext* rc) {
+    uint32_t ctxp = 0;
+    (void)address; (void)rc;
+    if (!g_dssSwapped) return;
+    if (Rd32((uintptr_t)IdaAddrToRuntime(ADDR_CONTEXT_VAR), &ctxp) && ctxp)
+        ID3D11DeviceContext_OMSetDepthStencilState((ID3D11DeviceContext*)(uintptr_t)ctxp, g_dssSaved, g_dssSavedRef);
+    REL(g_dssSaved); g_dssSwapped = 0;
+}
+static int g_translucentHooks;
 static void YawInstall(void) {
     if (g_yawState) return;
+    if (!g_translucentHooks) {
+        const uint8_t* a = (const uint8_t*)IdaAddrToRuntime(ADDR_MODEL_TRANSLUCENT); const uint8_t* e = (const uint8_t*)IdaAddrToRuntime(ADDR_MODEL_DRAW_EXIT);
+        int r1 = -9, r2 = -9;
+        // expected code: push -1; mov eax,[0x793580] ... / pop edi; pop esi; pop ebx; mov esp,ebp; pop ebp; ret 0xc
+        if (!IsBadReadPtr(a, 7) && !IsBadReadPtr(e, 9) && a[0] == 0x6A && a[1] == 0xFF && a[2] == 0xA1 && !memcmp(e, "\x5F\x5E\x5B\x8B\xE5\x5D\xC2\x0C\x00", 9)) {
+            r1 = DobbyInstrument((void*)a, TranslucentPre);
+            r2 = DobbyInstrument((void*)e, ModelDrawExitPre);
+        }
+        g_translucentHooks = 1;
+        if (g_logf) { fprintf(g_logf, "postfx: translucent cockpit parts without depth writes: hooks %d %d (0 = ok)\n", r1, r2); fflush(g_logf); }
+    }
     g_yawState = (YawPatchCall(YAW_CALL1) & YawPatchCall(YAW_CALL2)) ? 1 : -1;
     if (g_logf) { fprintf(g_logf, "postfx: yaw string overlay layer %s\n", g_yawState == 1 ? "installed" : "NOT installed (unexpected code)"); fflush(g_logf); }
 }
