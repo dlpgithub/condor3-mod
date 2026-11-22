@@ -149,21 +149,27 @@ VSO VS_Full(uint id : SV_VertexID)
 
 static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);
 
+// g_depth = depth at the HUD (cockpit pass only; the engine clears to the far value before it), g_world = depth saved before that
+// clear (= g_depth itself when there was no cockpit pass). A pixel the cockpit pass wrote uses its own depth, even where the world
+// behind it is "nearer" in depth terms: low over the ground max() of both picked the ground, and the ground's AO and contact
+// shadows showed on the pilot's legs.
+bool Written(float dc) { return (g_proj.w > 0.0) ? (dc > 1e-7) : (dc < 0.9999999); }
 float LoadDepth(int2 p)
 {
     p = clamp(p, int2(0, 0), int2(g_screen.xy) - 1);
 #if DEPTH_MS
-    return max(g_depth.Load(p, 0).x, g_world.Load(p, 0).x);
+    float dc = g_depth.Load(p, 0).x, dw = g_world.Load(p, 0).x;
 #else
-    return max(g_depth.Load(int3(p, 0)).x, g_world.Load(int3(p, 0)).x);
+    float dc = g_depth.Load(int3(p, 0)).x, dw = g_world.Load(int3(p, 0)).x;
 #endif
+    return (Written(dc) && dc != dw) ? dc : dw;
 }
 
 // D3DX left-handed projection: d = m22 + m32 / z  (works for forward and reversed Z)
 // Condor uses a reversed-Z projection (m32 > 0, far plane = depth 0); forward-Z (m32 < 0) is handled too.
 bool IsSky(float d) { return (g_proj.w > 0.0) ? (d < 1e-7) : (d > 0.999999); }
 
-// Cockpit pixel: the raw depth is nearer than the depth saved before the engine cleared it for the cockpit pass.
+// Cockpit pixel: written by the cockpit pass (depth no longer the cleared far value, and different from the saved world depth).
 bool CockpitPx(int2 p)
 {
     p = clamp(p, int2(0, 0), int2(g_screen.xy) - 1);
@@ -172,7 +178,7 @@ bool CockpitPx(int2 p)
 #else
     float dc = g_depth.Load(int3(p, 0)).x, dw = g_world.Load(int3(p, 0)).x;
 #endif
-    return dc > dw && !IsSky(dc);
+    return Written(dc) && dc != dw;
 }
 
 
