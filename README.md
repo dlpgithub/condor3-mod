@@ -1,5 +1,7 @@
 # Condor 3 mod: better look, big photo-scenery landscapes, landscape compiler
 
+<p align="center"><img src="docs/screenshot.jpg" alt="Condor 3 with the mod" width="720"></p>
+
 This package has three parts:
 
 1. **The mod** for Condor 3: a nicer picture (colour grading, haze, contact shadows, improved terrain/sky/cloud shaders) and
