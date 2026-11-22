@@ -66,6 +66,7 @@ static int g_clearLogN = 0;
 static unsigned g_clearCalls = 0;          // every call that reaches ClearDsvHook (diagnostics)
 static void* g_clearTarget = NULL;         // function address that was in vtable slot 53 when we hooked
 
+static int DeviceCheck(ID3D11Device* dev);
 static void STDMETHODCALLTYPE ClearDsvHook(ID3D11DeviceContext* self, ID3D11DepthStencilView* dsv, UINT flags, FLOAT d, UINT8 st) {
     g_clearCalls++;
     if (dsv && g_mainDepth && g_enabled) {
@@ -81,6 +82,10 @@ static void STDMETHODCALLTYPE ClearDsvHook(ID3D11DeviceContext* self, ID3D11Dept
             if (isMain && (flags & D3D11_CLEAR_DEPTH)) {
                 D3D11_TEXTURE2D_DESC md, wd;
                 ID3D11Device* dev = NULL;
+                int changed = 0;
+                ID3D11DeviceContext_GetDevice(self, &dev);               // a new flight's first clears come before the HUD hook
+                if (dev) { changed = DeviceCheck(dev); ID3D11Device_Release(dev); dev = NULL; }
+                if (changed) { ID3D11Resource_Release(res); g_origClear(self, dsv, flags, d, st); return; }   // g_mainDepth was the old flight's
                 g_clearsThisFrame++;
                 ID3D11Texture2D_GetDesc(g_mainDepth, &md);
                 if (g_worldCopy) { ID3D11Texture2D_GetDesc(g_worldCopy, &wd); if (wd.Width != md.Width || wd.Height != md.Height || wd.SampleDesc.Count != md.SampleDesc.Count || wd.Format != md.Format) { ID3D11Texture2D_Release(g_worldCopy); g_worldCopy = NULL; } }
@@ -375,6 +380,25 @@ static int OvEnsure(ID3D11Device* dev, UINT w, UINT h, DXGI_SAMPLE_DESC sd) {
     return 1;
 }
 
+// ---- one D3D11 device per flight ------------------------------------------------------------------------------
+// The game destroys its device at the end of a flight and creates a new one for the next ("Destroying DirectX 11 framework" /
+// "Created D3D11 Device" in Logs\Logfile.txt). Everything we create (effect core, yaw string layer, world depth copy) belongs to
+// one device; used with the next flight's context, native D3D11 crashed in the next draw ("Draw thermals: Access violation in
+// d3d11.dll", the game shut down; DXVK tolerated it). So: when the game's device is not the one our objects were made on, they are
+// all released and made again on demand. Our objects hold references to the old device, so the new one never has its address.
+static ID3D11Device* g_objDev = NULL;      // device of our objects (not referenced; only compared)
+static int DeviceCheck(ID3D11Device* dev) {   // render thread; 1 = changed (everything released)
+    if (!dev || dev == g_objDev) return 0;
+    if (!g_objDev) { g_objDev = dev; return 0; }
+    if (g_logf) { fprintf(g_logf, "postfx: new D3D11 device %p (was %p): our objects released, made again\n", (void*)dev, (void*)g_objDev); fflush(g_logf); }
+    if (g_core) { PfxCore_Destroy(g_core); g_core = NULL; }
+    OvRelease(); g_ovDrawn = 0;
+    if (g_worldCopy) { ID3D11Texture2D_Release(g_worldCopy); g_worldCopy = NULL; }
+    g_mainDepth = NULL; g_worldValid = 0; g_clearsThisFrame = 0; g_copiesThisFrame = 0;
+    g_objDev = dev;
+    return 1;
+}
+
 static uint32_t DelphiCall(uintptr_t fn, uint32_t a, uint32_t d, uint32_t c);
 // Called instead of FUN_00717304 (Delphi register convention: object in EAX = regparm(1)).
 static void __attribute__((regparm(1), used, noinline)) YawDraw(uint32_t obj) {
@@ -397,6 +421,7 @@ static void __attribute__((regparm(1), used, noinline)) YawDraw(uint32_t obj) {
         if (res) {
             ID3D11Texture2D_GetDesc((ID3D11Texture2D*)res, &cd);
             ID3D11DeviceContext_GetDevice(x, &dev);
+            if (dev) DeviceCheck(dev);
             if (dev && OvEnsure(dev, cd.Width, cd.Height, cd.SampleDesc)) {
                 static const FLOAT clr[2][4] = { { 0, 0, 0, 0 }, { 1, 1, 1, 1 } };
                 for (i = 0; i < 2; i++) {
@@ -461,6 +486,7 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
 
     if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_DEVICE_VAR), &dev) || !dev) { Diag("postfx: no device"); return; }
     if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_CONTEXT_VAR), &ctx) || !ctx) { Diag("postfx: no context"); return; }
+    DeviceCheck((ID3D11Device*)(uintptr_t)dev);
     YawInstall();
 
     if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_SWAPMGR_PTR), &p1) || !Rd32(p1, &mgr) || !mgr) { Diag("postfx: no swap manager (p1=%08x)", p1); return; }
