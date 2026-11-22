@@ -337,6 +337,7 @@ static OvTarget g_ov[2];               // 0 = black, 1 = white
 static UINT g_ovW = 0, g_ovH = 0;
 static int g_ovDrawn = 0;              // set by YawDraw, consumed by HudPre
 static int g_yawState = 0;             // 1 = call sites patched, <0 = unexpected code
+static volatile int g_yawLayer = 1;    // debug: cmd yawlayer on|off
 
 static void OvRelease(void) { int i; for (i = 0; i < 2; i++) { REL(g_ov[i].srv); REL(g_ov[i].rtv); REL(g_ov[i].tex); } g_ovW = g_ovH = 0; }
 static int OvEnsure(ID3D11Device* dev, UINT w, UINT h) {
@@ -370,7 +371,7 @@ static void __attribute__((regparm(1), used, noinline)) YawDraw(uint32_t obj) {
     int i;
 
     DelphiCall(fn, obj, 0, 0);                                   // the game's own draw, unchanged
-    if (!g_enabled || g_dead || !Rd32((uintptr_t)IdaAddrToRuntime(ADDR_CONTEXT_VAR), &ctxp) || !ctxp) return;
+    if (!g_yawLayer || !g_enabled || g_dead || !Rd32((uintptr_t)IdaAddrToRuntime(ADDR_CONTEXT_VAR), &ctxp) || !ctxp) return;
     x = (ID3D11DeviceContext*)(uintptr_t)ctxp;
     ID3D11DeviceContext_OMGetRenderTargets(x, 8, rtv, &dsv);
     if (rtv[0]) {
@@ -508,6 +509,7 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
 //   key NAME|0xVK [n]       key press (NAME: enter esc space tab up down left right f1..f12 a..z 0..9), n times
 //   keydown/keyup NAME      hold / release (e.g. for camera or controls)
 //   post on|off             post-processing on/off
+//   yawlayer on|off         debug: the yaw string overlay layer (extra draws for the final pass) on/off
 //   freeze on|off|toggle    stop / restart the glider's physics without pausing (hotkey Ctrl+Shift+F); move/att still work
 //   att [PITCH ROLL YAW]    print / set the glider's attitude in degrees (yaw = compass heading of the nose, pitch = nose up,
 //                           roll = right wing down); the velocity turns with the glider
@@ -1068,6 +1070,7 @@ static DWORD WINAPI RemoteThread(LPVOID unused) {
             else if (!_stricmp(c, "key")) { int vk = KeyVk(a); if (cnt < 1) cnt = 1; for (k = 0; k < cnt; k++) { KeyMsg(vk, 1); Sleep(60); KeyMsg(vk, 0); Sleep(120); } }
             else if (!_stricmp(c, "keydown")) KeyMsg(KeyVk(a), 1);
             else if (!_stricmp(c, "keyup")) KeyMsg(KeyVk(a), 0);
+            else if (!_stricmp(c, "yawlayer")) { g_yawLayer = _stricmp(a, "off") != 0; RLog("yawlayer: %s", g_yawLayer ? "on" : "off"); }
             else if (!_stricmp(c, "post")) { g_enabled = _stricmp(a, "off") != 0; RLog("postfx: %s", g_enabled ? "on" : "off"); }
             else if (!_stricmp(c, "wait")) Sleep(atoi(a));
             free(lines[i]);

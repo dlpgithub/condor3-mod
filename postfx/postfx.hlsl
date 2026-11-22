@@ -260,6 +260,7 @@ float PS_AO(VSO i) : SV_Target
 
     float z = ViewZ(d);
     float3 P = ViewPos(p, z);
+    bool ck = CockpitPx(p);   // cockpit and world are separate layers: one never occludes the other
 
     int2 oL = int2(-1, 0), oR = int2(1, 0), oU = int2(0, -1), oD = int2(0, 1);
     float zl = ViewZ(LoadDepth(p + oL)), zr = ViewZ(LoadDepth(p + oR));
@@ -281,6 +282,7 @@ float PS_AO(VSO i) : SV_Target
         float a = angle0 + k * 2.3999632;
         int2 o = int2(round(float2(cos(a), sin(a)) * (sqrt(t) * rpx)));
         int2 q = p + o;
+        if (CockpitPx(q) != ck) continue;
         float zq = ViewZ(LoadDepth(q));
         float3 v = ViewPos(q, zq) - P;
         float len = length(v) + 1e-4;
@@ -297,13 +299,14 @@ float PS_AOBlur(VSO i) : SV_Target
     float d = LoadDepth(p);
     if (IsSky(d)) return 1.0;
     float z = ViewZ(d);
+    bool ck = CockpitPx(p);
     float sum = 0, wsum = 0;
     [unroll] for (int y = -1; y <= 2; y++)
     [unroll] for (int x = -1; x <= 2; x++)
     {
         int2 q = clamp(p + int2(x, y), int2(0, 0), int2(g_screen.xy) - 1);
         float zq = ViewZ(LoadDepth(q));
-        float w = saturate(1.0 - abs(zq - z) / (0.04 * z + 0.05));
+        float w = saturate(1.0 - abs(zq - z) / (0.04 * z + 0.05)) * ((CockpitPx(q) == ck) ? 1.0 : 0.0);
         sum += g_t0.Load(int3(q, 0)).r * w;
         wsum += w;
     }
@@ -393,7 +396,7 @@ float3 Grade(float3 c, int2 p, float2 uv, float d, bool layer)
         float z = ViewZ(d);
         float ao = g_ao.Load(int3(p, 0)).r;
         float fade = 1.0 - saturate((z - AO_FADE_NEAR) / (AO_FADE_FAR - AO_FADE_NEAR));
-        lin *= lerp(1.0, ao, AO_STRENGTH * fade);
+        lin *= max(lerp(1.0, ao, AO_STRENGTH * fade), 0.0);   // strength > 1 must not go negative
         if (CONTACT_SHADOW > 0.0 && g_camPos.w > 0.5 && g_sunDir.z > 0.03 && !cock)
         {
             float cs = ContactShadow(p, ViewPos(p, z));
@@ -452,6 +455,7 @@ float3 Grade(float3 c, int2 p, float2 uv, float d, bool layer)
     lin *= expo;
 
     // soft highlight shoulder on luminance: keeps hue and saturation, no hard clipping
+    lin = max(lin, 0.0);   // negative light would be blown up to white by the division below
     float l = dot(lin, LUMA);
     float ls = (l < SHOULDER) ? l : SHOULDER + (1.0 - SHOULDER) * (1.0 - exp(-(l - SHOULDER) / (1.0 - SHOULDER)));
     lin *= ls / max(l, 1e-5);
