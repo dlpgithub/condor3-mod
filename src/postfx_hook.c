@@ -318,52 +318,101 @@ static int ReadProjection(PfxCamera* cam) {
 
 static void FreezeFrame(void);
 static void DoDump(const char* name);
-// ---- yaw string depth ----------------------------------------------------------------------------------------
-// Avion.Panel.DrawYawstring (FUN_006face8 @ 0x6fb519 and the second path @ 0x6fb649) binds the engine's global
-// "depth disabled" state (*[0x793008] = 0x7da12c: DepthEnable=FALSE) around the yaw string draw (thick lines +
-// tuft mesh). With depth disabled D3D11 also writes no depth, so after the cockpit pass the string's pixels still
-// hold the cleared cockpit depth and the postfx sees the terrain/sky depth behind it: below the horizon the string
-// gets haze, AO and the world grade, above the horizon (sky) it does not.
-// We patch the two `MOV EAX,[0x793008]` operands to point at our own state: depth test ALWAYS (draws over everything,
-// exactly as before) but with depth writes on, so the string leaves its real depth like every other cockpit object.
-#define YAW_SITE1 0x6fb525
-#define YAW_SITE2 0x6fb655
-#define YAW_DSS_PP 0x793008
-static ID3D11DepthStencilState* g_yawDss = NULL;
-static void* g_yawDssAddr = NULL;     // [operand] -> &g_yawDss -> state
-static int g_yawState = 0;            // 0 = not yet, 1 = patched, <0 = failed / unexpected code
+// ---- yaw string: translucent overlay layer ----------------------------------------------------------------
+// Avion.Panel.DrawYawstring (FUN_006face8) draws the yaw string after the cockpit depth clear with the engine's global
+// "depth disabled" state (*[0x793008]: DepthEnable = FALSE, so no depth test and no depth write), alpha blended over
+// whatever is behind it. It leaves no depth, and it is translucent: its soft edges are mostly the world behind it.
+// Whatever depth rule the postfx uses, a pixel that is part string, part world gets one treatment for both, e.g. the
+// world part of the edges loses its haze below the horizon and the string looks thicker there.
+// So the string is handled as a layer: both calls of FUN_00717304 (0x6fb543 and 0x6fb673, `CALL rel32`) go through
+// YawDraw, which runs the original draw unchanged and then draws the string again into two private targets cleared to
+// black and to white. The final pass gets C = ovB + (1 - a) * W, a = 1 - (ovW - ovB), and grades the string and the
+// world behind it separately.
+#define FN_YAW_DRAW 0x717304
+#define YAW_CALL1 0x6fb543
+#define YAW_CALL2 0x6fb673
+#define REL(p) do { if (p) { (p)->lpVtbl->Release(p); (p) = NULL; } } while (0)
+typedef struct { ID3D11Texture2D* tex; ID3D11RenderTargetView* rtv; ID3D11ShaderResourceView* srv; } OvTarget;
+static OvTarget g_ov[2];               // 0 = black, 1 = white
+static UINT g_ovW = 0, g_ovH = 0;
+static int g_ovDrawn = 0;              // set by YawDraw, consumed by HudPre
+static int g_yawState = 0;             // 1 = call sites patched, <0 = unexpected code
 
-static int YawPatchSite(uintptr_t ida, uint32_t expect, uint32_t repl) {
+static void OvRelease(void) { int i; for (i = 0; i < 2; i++) { REL(g_ov[i].srv); REL(g_ov[i].rtv); REL(g_ov[i].tex); } g_ovW = g_ovH = 0; }
+static int OvEnsure(ID3D11Device* dev, UINT w, UINT h) {
+    D3D11_TEXTURE2D_DESC d;
+    int i;
+    if (g_ov[0].tex && g_ovW == w && g_ovH == h) return 1;
+    OvRelease();
+    memset(&d, 0, sizeof d);
+    d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    for (i = 0; i < 2; i++) {
+        if (FAILED(ID3D11Device_CreateTexture2D(dev, &d, NULL, &g_ov[i].tex)) ||
+            FAILED(ID3D11Device_CreateRenderTargetView(dev, (ID3D11Resource*)g_ov[i].tex, NULL, &g_ov[i].rtv)) ||
+            FAILED(ID3D11Device_CreateShaderResourceView(dev, (ID3D11Resource*)g_ov[i].tex, NULL, &g_ov[i].srv))) { OvRelease(); return 0; }
+    }
+    g_ovW = w; g_ovH = h;
+    return 1;
+}
+
+static uint32_t DelphiCall(uintptr_t fn, uint32_t a, uint32_t d, uint32_t c);
+// Called instead of FUN_00717304 (Delphi register convention: object in EAX = regparm(1)).
+static void __attribute__((regparm(1), used, noinline)) YawDraw(uint32_t obj) {
+    uintptr_t fn = (uintptr_t)IdaAddrToRuntime(FN_YAW_DRAW);
+    uint32_t ctxp = 0;
+    ID3D11DeviceContext* x;
+    ID3D11RenderTargetView* rtv[8] = { 0 };
+    ID3D11DepthStencilView* dsv = NULL;
+    ID3D11Device* dev = NULL;
+    ID3D11Resource* res = NULL;
+    D3D11_TEXTURE2D_DESC cd;
+    int i;
+
+    DelphiCall(fn, obj, 0, 0);                                   // the game's own draw, unchanged
+    if (!g_enabled || g_dead || !Rd32((uintptr_t)IdaAddrToRuntime(ADDR_CONTEXT_VAR), &ctxp) || !ctxp) return;
+    x = (ID3D11DeviceContext*)(uintptr_t)ctxp;
+    ID3D11DeviceContext_OMGetRenderTargets(x, 8, rtv, &dsv);
+    if (rtv[0]) {
+        ID3D11RenderTargetView_GetResource(rtv[0], &res);
+        if (res) {
+            ID3D11Texture2D_GetDesc((ID3D11Texture2D*)res, &cd);
+            ID3D11DeviceContext_GetDevice(x, &dev);
+            if (dev && cd.SampleDesc.Count == 1 && OvEnsure(dev, cd.Width, cd.Height)) {
+                static const FLOAT clr[2][4] = { { 0, 0, 0, 0 }, { 1, 1, 1, 1 } };
+                for (i = 0; i < 2; i++) {
+                    ID3D11DeviceContext_ClearRenderTargetView(x, g_ov[i].rtv, clr[i]);
+                    ID3D11DeviceContext_OMSetRenderTargets(x, 1, &g_ov[i].rtv, dsv);
+                    DelphiCall(fn, obj, 0, 0);
+                }
+                ID3D11DeviceContext_OMSetRenderTargets(x, 8, rtv, dsv);
+                g_ovDrawn = 1;
+            }
+            REL(dev);
+            ID3D11Resource_Release(res);
+        }
+    }
+    for (i = 0; i < 8; i++) REL(rtv[i]);
+    REL(dsv);
+}
+
+static int YawPatchCall(uintptr_t ida) {
     uint8_t* a = (uint8_t*)IdaAddrToRuntime(ida);
+    uintptr_t orig = (uintptr_t)IdaAddrToRuntime(FN_YAW_DRAW);
+    int32_t rel;
     DWORD old;
-    if (IsBadReadPtr(a, 5) || a[0] != 0xA1 || *(uint32_t*)(a + 1) != expect) return 0;
+    if (IsBadReadPtr(a, 5) || a[0] != 0xE8 || (uintptr_t)(a + 5) + *(int32_t*)(a + 1) != orig) return 0;
+    rel = (int32_t)((uintptr_t)YawDraw - (uintptr_t)(a + 5));
     if (!VirtualProtect(a, 5, PAGE_EXECUTE_READWRITE, &old)) return 0;
-    *(uint32_t*)(a + 1) = repl;
+    *(int32_t*)(a + 1) = rel;
     VirtualProtect(a, 5, old, &old);
     FlushInstructionCache(GetCurrentProcess(), a, 5);
     return 1;
 }
-
-static void YawstringDepth(uint32_t dev) {
-    D3D11_DEPTH_STENCIL_DESC d;
-    uint32_t pp = (uint32_t)(uintptr_t)IdaAddrToRuntime(YAW_DSS_PP), mine;
-    if (g_yawState || !dev) return;
-    memset(&d, 0, sizeof d);
-    d.DepthEnable = TRUE; d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; d.DepthFunc = D3D11_COMPARISON_ALWAYS;
-    d.StencilEnable = FALSE; d.StencilReadMask = 0xff; d.StencilWriteMask = 0xff;
-    d.FrontFace.StencilFailOp = d.FrontFace.StencilDepthFailOp = d.FrontFace.StencilPassOp = D3D11_STENCIL_OP_KEEP;
-    d.FrontFace.StencilFunc = D3D11_COMPARISON_ALWAYS; d.BackFace = d.FrontFace;
-    if (FAILED(ID3D11Device_CreateDepthStencilState((ID3D11Device*)(uintptr_t)dev, &d, &g_yawDss)) || !g_yawDss) { g_yawState = -1; return; }
-    g_yawDssAddr = &g_yawDss;
-    mine = (uint32_t)(uintptr_t)&g_yawDssAddr;
-    {
-        uint8_t* s1 = (uint8_t*)IdaAddrToRuntime(YAW_SITE1);
-        uint8_t* s2 = (uint8_t*)IdaAddrToRuntime(YAW_SITE2);
-        int ok1 = !IsBadReadPtr(s1, 5) && s1[0] == 0xA1 && *(uint32_t*)(s1 + 1) == pp;
-        int ok2 = !IsBadReadPtr(s2, 5) && s2[0] == 0xA1 && *(uint32_t*)(s2 + 1) == pp;
-        g_yawState = (ok1 && ok2 && YawPatchSite(YAW_SITE1, pp, mine) && YawPatchSite(YAW_SITE2, pp, mine)) ? 1 : -2;
-    }
-    if (g_logf) { fprintf(g_logf, "postfx: yaw string depth write %s\n", g_yawState == 1 ? "patched" : "NOT patched (unexpected code)"); fflush(g_logf); }
+static void YawInstall(void) {
+    if (g_yawState) return;
+    g_yawState = (YawPatchCall(YAW_CALL1) & YawPatchCall(YAW_CALL2)) ? 1 : -1;
+    if (g_logf) { fprintf(g_logf, "postfx: yaw string overlay layer %s\n", g_yawState == 1 ? "installed" : "NOT installed (unexpected code)"); fflush(g_logf); }
 }
 
 static void GotoApply(void); static volatile int g_gotoPending;
@@ -374,6 +423,8 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
     PfxCamera cam;
     (void)address; (void)rc;
 
+    int ovDrawn = g_ovDrawn;
+    g_ovDrawn = 0;
     if (g_dead) return;
     g_frames++;
     FreezeFrame();                       // Ctrl+Shift+F freeze toggle, pending `att` (main thread)
@@ -389,7 +440,7 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
 
     if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_DEVICE_VAR), &dev) || !dev) { Diag("postfx: no device"); return; }
     if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_CONTEXT_VAR), &ctx) || !ctx) { Diag("postfx: no context"); return; }
-    YawstringDepth(dev);
+    YawInstall();
 
     if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_SWAPMGR_PTR), &p1) || !Rd32(p1, &mgr) || !mgr) { Diag("postfx: no swap manager (p1=%08x)", p1); return; }
     if (!Rd32(mgr + MGR_OFF_INDEX, &idx) || !Rd32(mgr + MGR_OFF_ITEMS, &arr) || !arr) { Diag("postfx: manager layout (mgr=%08x)", mgr); return; }
@@ -434,6 +485,7 @@ static void HudPre(void* address, DobbyRegisterContext* rc) {
         }
         lastOk = ok; lastCopies = g_copiesThisFrame; lastClears = g_clearsThisFrame;
     }
+    PfxCore_SetOverlay(g_core, ovDrawn ? g_ov[0].srv : NULL, ovDrawn ? g_ov[1].srv : NULL);
     if (PfxCore_Run(g_core, (ID3D11DeviceContext*)(uintptr_t)ctx, (ID3D11Texture2D*)(uintptr_t)color,
                     (ID3D11RenderTargetView*)(uintptr_t)rtv, (ID3D11Texture2D*)(uintptr_t)depth,
                     (g_worldCopy && g_worldValid && g_copiesThisFrame >= 2) ? g_worldCopy : NULL, &cam)) {   // 1 clear/frame (external view, no cockpit pass): the copy is last frame's depth, the live depth already is the world

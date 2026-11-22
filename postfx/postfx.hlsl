@@ -133,6 +133,12 @@ Texture2D g_t3 : register(t3);
 Texture2D g_t4 : register(t4);
 Texture2D g_ao : register(t5);
 Texture3D<float4> g_lut : register(t7);
+// Translucent cockpit overlay (the yaw string): the engine draws it without depth, blended over the world. The mod draws it a
+// second and third time into these targets, cleared to black and to white, so per pixel: C = ovB + (1 - a) * W with
+// a = 1 - (ovW - ovB). That separates the string from the world behind it, and both are graded as what they are.
+// g_misc.z = 1 when they were drawn this frame.
+Texture2D g_ovB : register(t8);
+Texture2D g_ovW : register(t9);
 
 SamplerState g_lin : register(s0);
 SamplerState g_pt  : register(s1);
@@ -371,51 +377,24 @@ float3 ACES(float3 x)
     return saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
 }
 
-float4 PS_Final(VSO i) : SV_Target
+// Colour pipeline of one surface. layer = the colour belongs to the translucent cockpit overlay (yaw string): graded like a
+// cockpit pixel, without the world's AO / contact shadow / haze / sky treatment.
+float3 Grade(float3 c, int2 p, float2 uv, float d, bool layer)
 {
-    int2 p = int2(i.pos.xy);
-    float2 uv = i.pos.xy * g_screen.zw;
-
-    // --- sharpen in display space, limited to the local range so it cannot ring
-    float3 c  = Scene(p);
-    if (CHROMA_AB > 0.0)   // lens colour fringing, zero in the centre, grows towards the corners
-    {
-        float2 dd = uv - 0.5;
-        float2 sh = dd * dot(dd, dd) * 2.0 * CHROMA_AB * g_screen.zw;
-        c.r = g_t0.SampleLevel(g_lin, uv + sh, 0).r;
-        c.b = g_t0.SampleLevel(g_lin, uv - sh, 0).b;
-    }
-    float3 cL = Scene(p + int2(-1, 0)), cR = Scene(p + int2(1, 0));
-    float3 cU = Scene(p + int2(0, -1)), cD = Scene(p + int2(0, 1));
-    float3 lo = min(c, min(min(cL, cR), min(cU, cD)));
-    float3 hi = max(c, max(max(cL, cR), max(cU, cD)));
-    float3 avg = (cL + cR + cU + cD) * 0.25;
-    c = clamp(c + (c - avg) * SHARPEN, lo, hi);
-    if (CLARITY > 0.0)   // local contrast: luminance minus a wide blur, mid-tones only, limited so it cannot halo
-    {
-        float lc = dot(c, LUMA), lb = 0.0;
-        [unroll] for (int k = 0; k < 8; k++)
-        {
-            float a = k * 0.7853982 + 0.3;
-            float2 o = float2(cos(a), sin(a));
-            lb += dot(Scene(p + int2(round(o * CLARITY_RADIUS))), LUMA);
-            lb += dot(Scene(p + int2(round(o * CLARITY_RADIUS * 0.5))), LUMA);
-        }
-        lb = (lb + lc) / 17.0;
-        float mid = 1.0 - saturate(abs(lc * 2.0 - 1.0));
-        c += clamp((lc - lb) * CLARITY * mid * 1.5, -0.12, 0.12);
-    }
-
+    bool sky = !layer && IsSky(d);
+    bool cock = layer || CockpitPx(p);
     float3 lin = pow(max(c, 0.0), 2.2);
 
-    float d = LoadDepth(p);
-    if (!IsSky(d))
+    if (layer)
+    {
+    }
+    else if (!sky)
     {
         float z = ViewZ(d);
         float ao = g_ao.Load(int3(p, 0)).r;
         float fade = 1.0 - saturate((z - AO_FADE_NEAR) / (AO_FADE_FAR - AO_FADE_NEAR));
         lin *= lerp(1.0, ao, AO_STRENGTH * fade);
-        if (CONTACT_SHADOW > 0.0 && g_camPos.w > 0.5 && g_sunDir.z > 0.03 && !CockpitPx(p))
+        if (CONTACT_SHADOW > 0.0 && g_camPos.w > 0.5 && g_sunDir.z > 0.03 && !cock)
         {
             float cs = ContactShadow(p, ViewPos(p, z));
             lin *= 1.0 - 0.6 * CONTACT_SHADOW * cs * fade * smoothstep(0.03, 0.2, g_sunDir.z);
@@ -458,7 +437,7 @@ float4 PS_Final(VSO i) : SV_Target
     // colour grade (all off by default)
     {
         float lg = dot(lin, LUMA);
-        float greenness = saturate((lin.g - max(lin.r, lin.b)) / max(lin.g, 1e-3) * 3.0) * (IsSky(d) ? 0.0 : 1.0);
+        float greenness = saturate((lin.g - max(lin.r, lin.b)) / max(lin.g, 1e-3) * 3.0) * (sky ? 0.0 : 1.0);
         lin.r += GREEN_WARM * greenness * lin.g * 0.18;
         lin.b *= 1.0 - GREEN_WARM * greenness * 0.35;
         lin = lerp(lin, float3(lg, lg, lg), GREEN_DESAT * greenness);
@@ -469,7 +448,7 @@ float4 PS_Final(VSO i) : SV_Target
         lin += SHADOW_LIFT * 0.02 * (1.0 - smoothstep(0.0, 0.18, lg)) * lerp(float3(1, 1, 1), lin / max(lg, 1e-3), 0.5);
     }
     float expo = EXPOSURE;
-    if (g_camPos.w > 0.5 && !IsSky(d)) expo *= 1.0 + AUTO_EXPOSURE * (1.0 - smoothstep(0.05, 0.65, g_sunDir.z));   // ground only: the sky is already bright
+    if (g_camPos.w > 0.5 && !sky) expo *= 1.0 + AUTO_EXPOSURE * (1.0 - smoothstep(0.05, 0.65, g_sunDir.z));   // ground only: the sky is already bright
     lin *= expo;
 
     // soft highlight shoulder on luminance: keeps hue and saturation, no hard clipping
@@ -480,7 +459,7 @@ float4 PS_Final(VSO i) : SV_Target
     lin = max(lerp(float3(l, l, l), lin, SATURATION), 0.0);
 
     float3 g = pow(saturate(lin), 1.0 / 2.2);
-    g = lerp(g, g * g * (3.0 - 2.0 * g), CONTRAST + (IsSky(d) ? 0.0 : TERRAIN_CONTRAST));
+    g = lerp(g, g * g * (3.0 - 2.0 * g), CONTRAST + (sky ? 0.0 : TERRAIN_CONTRAST));
     lin = g;
 
     float2 q = uv - 0.5;
@@ -490,7 +469,7 @@ float4 PS_Final(VSO i) : SV_Target
 #if DEBUG_VIEW == 1
     outc = g_ao.Load(int3(p, 0)).r;
 #elif DEBUG_VIEW == 2
-    outc = IsSky(d) ? 1.0 : saturate(ViewZ(d) / 2000.0);
+    outc = sky ? 1.0 : saturate(ViewZ(d) / 2000.0);
 #elif DEBUG_VIEW == 3
     outc = saturate(bloom * 4.0);
 #endif
@@ -498,12 +477,67 @@ float4 PS_Final(VSO i) : SV_Target
     {
         float ln = max(LUT_SIZE, 2.0);
         float3 uvw = saturate(outc) * ((ln - 1.0) / ln) + 0.5 / ln;
-        outc = lerp(outc, g_lut.SampleLevel(g_lin, uvw, 0).rgb, LUT_STRENGTH * (CockpitPx(p) ? LUT_COCKPIT : 1.0));
+        outc = lerp(outc, g_lut.SampleLevel(g_lin, uvw, 0).rgb, LUT_STRENGTH * (cock ? LUT_COCKPIT : 1.0));
     }
     {   // white balance in linear light, skipped in the cockpit so instruments keep their colours
         float3 wl = pow(saturate(outc), 2.2) * float3(1.0 + WARMTH, 1.0 + WARMTH * 0.15, 1.0 - WARMTH * 1.1);
-        outc = lerp(pow(saturate(wl), 1.0 / 2.2), outc, CockpitPx(p) ? 1.0 : 0.0);
+        outc = lerp(pow(saturate(wl), 1.0 / 2.2), outc, cock ? 1.0 : 0.0);
     }
+    return outc;
+}
+
+float4 PS_Final(VSO i) : SV_Target
+{
+    int2 p = int2(i.pos.xy);
+    float2 uv = i.pos.xy * g_screen.zw;
+
+    // --- sharpen in display space, limited to the local range so it cannot ring
+    float3 c  = Scene(p);
+    if (CHROMA_AB > 0.0)   // lens colour fringing, zero in the centre, grows towards the corners
+    {
+        float2 dd = uv - 0.5;
+        float2 sh = dd * dot(dd, dd) * 2.0 * CHROMA_AB * g_screen.zw;
+        c.r = g_t0.SampleLevel(g_lin, uv + sh, 0).r;
+        c.b = g_t0.SampleLevel(g_lin, uv - sh, 0).b;
+    }
+    float3 cL = Scene(p + int2(-1, 0)), cR = Scene(p + int2(1, 0));
+    float3 cU = Scene(p + int2(0, -1)), cD = Scene(p + int2(0, 1));
+    float3 lo = min(c, min(min(cL, cR), min(cU, cD)));
+    float3 hi = max(c, max(max(cL, cR), max(cU, cD)));
+    float3 avg = (cL + cR + cU + cD) * 0.25;
+    c = clamp(c + (c - avg) * SHARPEN, lo, hi);
+    if (CLARITY > 0.0)   // local contrast: luminance minus a wide blur, mid-tones only, limited so it cannot halo
+    {
+        float lc = dot(c, LUMA), lb = 0.0;
+        [unroll] for (int k = 0; k < 8; k++)
+        {
+            float a = k * 0.7853982 + 0.3;
+            float2 o = float2(cos(a), sin(a));
+            lb += dot(Scene(p + int2(round(o * CLARITY_RADIUS))), LUMA);
+            lb += dot(Scene(p + int2(round(o * CLARITY_RADIUS * 0.5))), LUMA);
+        }
+        lb = (lb + lc) / 17.0;
+        float mid = 1.0 - saturate(abs(lc * 2.0 - 1.0));
+        c += clamp((lc - lb) * CLARITY * mid * 1.5, -0.12, 0.12);
+    }
+
+    float d = LoadDepth(p);
+    float3 outc;
+    float a = 0.0;
+    float3 S = float3(0, 0, 0), W = c;
+    if (g_misc.z > 0.5)   // translucent overlay (yaw string): split into the string and the world behind it
+    {
+        float3 mb = g_ovB.Load(int3(p, 0)).rgb, mw = g_ovW.Load(int3(p, 0)).rgb;
+        a = saturate(1.0 - dot(mw - mb, float3(1.0, 1.0, 1.0) / 3.0));
+        if (a > 0.004)
+        {
+            S = saturate(mb / a);
+            if (a < 0.996) W = saturate((c - mb) / (1.0 - a));
+        }
+        else a = 0.0;
+    }
+    outc = Grade(W, p, uv, d, false);
+    if (a > 0.0) outc = lerp(outc, Grade(S, p, uv, d, true), a);
     float n = (IGN(i.pos.xy, g_misc.y) + IGN(i.pos.xy, g_misc.y + 17.0) - 1.0) * (DITHER / 255.0);
     {
         float lo2 = dot(outc, LUMA);

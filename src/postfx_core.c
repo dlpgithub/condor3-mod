@@ -1,6 +1,7 @@
 // postfx_core.c - see postfx_core.h
 #define COBJMACROS
 #include "postfx_core.h"
+#define PFX_SRVS 10   // t0..t9
 
 #include <stdint.h>
 #include <stdarg.h>
@@ -67,6 +68,7 @@ struct PfxCore {
     int tuneDirty;
     ID3D11Texture3D* lutTex;            // t7: colour grading LUT (postfx/lut.cube); identity when absent
     ID3D11ShaderResourceView* lutSrv;
+    ID3D11ShaderResourceView* ovB; ID3D11ShaderResourceView* ovW;   // translucent overlay layer (not owned), this frame only
     char lutPath[MAX_PATH];
     FILETIME lutTime;
     int lutSize;
@@ -414,7 +416,7 @@ typedef struct {
     ID3D11Buffer* ib; DXGI_FORMAT ibFmt; UINT ibOff;
     ID3D11VertexShader* vs; ID3D11PixelShader* ps; ID3D11GeometryShader* gs;
     ID3D11Buffer* vscb[4]; ID3D11Buffer* pscb[4];
-    ID3D11ShaderResourceView* pssrv[8]; ID3D11ShaderResourceView* vssrv[4];
+    ID3D11ShaderResourceView* pssrv[PFX_SRVS]; ID3D11ShaderResourceView* vssrv[4];
     ID3D11SamplerState* pssmp[4]; ID3D11SamplerState* vssmp[4];
 } SavedState;
 
@@ -437,7 +439,7 @@ static void SaveState(ID3D11DeviceContext* x, SavedState* s) {
     ID3D11DeviceContext_GSGetShader(x, &s->gs, NULL, NULL);
     ID3D11DeviceContext_VSGetConstantBuffers(x, 0, 4, s->vscb);
     ID3D11DeviceContext_PSGetConstantBuffers(x, 0, 4, s->pscb);
-    ID3D11DeviceContext_PSGetShaderResources(x, 0, 8, s->pssrv);
+    ID3D11DeviceContext_PSGetShaderResources(x, 0, PFX_SRVS, s->pssrv);
     ID3D11DeviceContext_VSGetShaderResources(x, 0, 4, s->vssrv);
     ID3D11DeviceContext_PSGetSamplers(x, 0, 4, s->pssmp);
     ID3D11DeviceContext_VSGetSamplers(x, 0, 4, s->vssmp);
@@ -460,7 +462,7 @@ static void RestoreState(ID3D11DeviceContext* x, SavedState* s) {
     ID3D11DeviceContext_GSSetShader(x, s->gs, NULL, 0);
     ID3D11DeviceContext_VSSetConstantBuffers(x, 0, 4, s->vscb);
     ID3D11DeviceContext_PSSetConstantBuffers(x, 0, 4, s->pscb);
-    ID3D11DeviceContext_PSSetShaderResources(x, 0, 8, s->pssrv);
+    ID3D11DeviceContext_PSSetShaderResources(x, 0, PFX_SRVS, s->pssrv);
     ID3D11DeviceContext_VSSetShaderResources(x, 0, 4, s->vssrv);
     ID3D11DeviceContext_PSSetSamplers(x, 0, 4, s->pssmp);
     ID3D11DeviceContext_VSSetSamplers(x, 0, 4, s->vssmp);
@@ -468,7 +470,7 @@ static void RestoreState(ID3D11DeviceContext* x, SavedState* s) {
     for (i = 0; i < 8; i++) REL(s->rtv[i]);
     REL(s->dsv); REL(s->rs); REL(s->dss); REL(s->bs); REL(s->il);
     for (i = 0; i < 4; i++) { REL(s->vb[i]); REL(s->vscb[i]); REL(s->pscb[i]); REL(s->vssrv[i]); REL(s->pssmp[i]); REL(s->vssmp[i]); }
-    for (i = 0; i < 8; i++) REL(s->pssrv[i]);
+    for (i = 0; i < PFX_SRVS; i++) REL(s->pssrv[i]);
     REL(s->ib); REL(s->vs); REL(s->ps); REL(s->gs);
 }
 
@@ -476,16 +478,16 @@ static void RestoreState(ID3D11DeviceContext* x, SavedState* s) {
 // drawing
 // ---------------------------------------------------------------------------------------------
 static void DrawPass(PfxCore* c, ID3D11DeviceContext* x, const PfxCamera* cam, ID3D11RenderTargetView* rtv,
-                     UINT dw, UINT dh, ID3D11PixelShader* ps, ID3D11ShaderResourceView* const srv[8],
+                     UINT dw, UINT dh, ID3D11PixelShader* ps, ID3D11ShaderResourceView* const srv[PFX_SRVS],
                      float p0, float p1, float p2, float p3) {
     D3D11_MAPPED_SUBRESOURCE m;
     D3D11_VIEWPORT vp;
     CBData cd;
-    ID3D11ShaderResourceView* none[8] = { 0 };
+    ID3D11ShaderResourceView* none[PFX_SRVS] = { 0 };
 
     cd.screen[0] = (float)c->w; cd.screen[1] = (float)c->h; cd.screen[2] = 1.0f / c->w; cd.screen[3] = 1.0f / c->h;
     cd.proj[0] = cam->m00; cd.proj[1] = cam->m11; cd.proj[2] = cam->m22; cd.proj[3] = cam->m32;
-    cd.misc[0] = cam->time; cd.misc[1] = (float)c->frame; cd.misc[2] = 0; cd.misc[3] = 0;
+    cd.misc[0] = cam->time; cd.misc[1] = (float)c->frame; cd.misc[2] = (c->ovB && c->ovW) ? 1.0f : 0.0f; cd.misc[3] = 0;
     cd.dst[0] = (float)dw; cd.dst[1] = (float)dh; cd.dst[2] = 1.0f / dw; cd.dst[3] = 1.0f / dh;
     cd.pass[0] = p0; cd.pass[1] = p1; cd.pass[2] = p2; cd.pass[3] = p3;
     memcpy(cd.view, cam->view, sizeof cd.view); memcpy(cd.camPos, cam->camPos, sizeof cd.camPos);
@@ -498,10 +500,10 @@ static void DrawPass(PfxCore* c, ID3D11DeviceContext* x, const PfxCamera* cam, I
     ID3D11DeviceContext_OMSetRenderTargets(x, 1, &rtv, NULL);
     vp.TopLeftX = 0; vp.TopLeftY = 0; vp.Width = (float)dw; vp.Height = (float)dh; vp.MinDepth = 0; vp.MaxDepth = 1;
     ID3D11DeviceContext_RSSetViewports(x, 1, &vp);
-    ID3D11DeviceContext_PSSetShaderResources(x, 0, 8, srv);
+    ID3D11DeviceContext_PSSetShaderResources(x, 0, PFX_SRVS, srv);
     ID3D11DeviceContext_PSSetShader(x, ps, NULL, 0);
     ID3D11DeviceContext_Draw(x, 3, 0);
-    ID3D11DeviceContext_PSSetShaderResources(x, 0, 8, none);
+    ID3D11DeviceContext_PSSetShaderResources(x, 0, PFX_SRVS, none);
 }
 
 static void WriteCapture(PfxCore* c, ID3D11DeviceContext* x, const PfxCamera* cam) {
@@ -640,13 +642,14 @@ void PfxCore_RequestCapture(PfxCore* c, const char* path) {
 float PfxCore_GetTune(PfxCore* c, int slot, float fallback) { return (c && slot >= 0 && slot < 64 && c->tuneNames[slot][0]) ? c->tune[slot] : fallback; }
 
 void PfxCore_RequestReload(PfxCore* c) { if (c) c->reload = 1; }
+void PfxCore_SetOverlay(PfxCore* c, ID3D11ShaderResourceView* black, ID3D11ShaderResourceView* white) { if (c) { c->ovB = black; c->ovW = white; } }
 
 int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* x, ID3D11Texture2D* color, ID3D11RenderTargetView* colorRTV,
                 ID3D11Texture2D* depth, ID3D11Texture2D* world, const PfxCamera* cam) {
     D3D11_TEXTURE2D_DESC cd;
     ID3D11ShaderResourceView* worldSrv;
     SavedState st;
-    ID3D11ShaderResourceView* s[8];
+    ID3D11ShaderResourceView* s[PFX_SRVS];
     ID3D11Buffer* cbs[2];
     ID3D11SamplerState* smp[2];
     int i, depthMS;
@@ -757,6 +760,7 @@ int PfxCore_Run(PfxCore* c, ID3D11DeviceContext* x, ID3D11Texture2D* color, ID3D
     s[2] = c->lv[0].srv; s[3] = c->lv[1].srv; s[4] = c->lv[2].srv;
     s[5] = c->aoBlur.srv;
     s[7] = c->lutSrv;
+    s[8] = c->ovB; s[9] = c->ovW;
     DrawPass(c, x, cam, colorRTV, c->w, c->h, c->psFinal, s, 0, 0, 0, 0);
 
     RestoreState(x, &st);

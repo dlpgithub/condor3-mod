@@ -50,6 +50,9 @@ float PfxCore_GetTune(PfxCore* c, int slot, float fallback);
 
 // Force a shader reload at the next run.
 void PfxCore_RequestReload(PfxCore* c);
+// Translucent overlay layer for the next PfxCore_Run: the overlay drawn onto black and onto white (same size as the colour
+// buffer). NULL = none this frame.
+void PfxCore_SetOverlay(PfxCore* c, ID3D11ShaderResourceView* black, ID3D11ShaderResourceView* white);
 
 #ifdef __cplusplus
 }
