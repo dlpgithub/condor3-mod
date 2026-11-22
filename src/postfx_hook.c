@@ -464,16 +464,23 @@ static int YawPatchCall(uintptr_t ida) {
 // pass (after the cockpit depth clear) and while the effect is on, their loop runs with a copy of the bound depth state without
 // depth writes (the depth test stays: glass behind cockpit parts stays hidden); the game's state is put back when the function
 // returns (0x772e85). Not in the world pass: there a canopy without depth would let clouds drawn later appear in front of it.
+// Only for the glider's own geometry (Discus2aIE.c3d etc.: canopy, clear-view window, PDA glass), drawn through the wrapper
+// FUN_00762104 (return address 0x762126). The instruments are separate models (Gauges\*.c3d) whose "Glass" part (alpha 0.1)
+// must keep writing depth: the panel drawn after them relies on it, without it the panel covered the dials (only the needles
+// stayed in front).
 #define ADDR_MODEL_TRANSLUCENT 0x772929
 #define ADDR_MODEL_DRAW_EXIT   0x772e85
+#define ADDR_GEOMETRY_DRAW_RET 0x762126   // FUN_00762104: geometry->model (+8) through FUN_00772688
 typedef struct { ID3D11DepthStencilState* src; ID3D11DepthStencilState* noWrite; } DssClone;
 static DssClone g_dssClone[8]; static int g_nDssClone;
 static ID3D11DepthStencilState* g_dssSaved; static UINT g_dssSavedRef; static int g_dssSwapped;
 static void DssCloneRelease(void) { int i; for (i = 0; i < g_nDssClone; i++) { REL(g_dssClone[i].noWrite); REL(g_dssClone[i].src); } g_nDssClone = 0; }
 static void TranslucentPre(void* address, DobbyRegisterContext* rc) {
     uint32_t ctxp = 0; ID3D11DeviceContext* x; ID3D11DepthStencilState* cur = NULL; ID3D11DepthStencilState* nw = NULL; UINT ref = 0; int i;
-    (void)address; (void)rc;
+    (void)address;
     if (g_dssSwapped || !g_enabled || g_dead || g_clearsThisFrame < 2) return;       // cockpit pass only (2nd clear of the main depth)
+    {   uint32_t ret = 0;                                                           // FUN_00772688 has an EBP frame: [ebp+4] = its caller
+        if (!Rd32(rc->general.regs.ebp + 4, &ret) || ret != (uint32_t)(uintptr_t)IdaAddrToRuntime(ADDR_GEOMETRY_DRAW_RET)) return; }
     if (!Rd32((uintptr_t)IdaAddrToRuntime(ADDR_CONTEXT_VAR), &ctxp) || !ctxp) return;
     x = (ID3D11DeviceContext*)(uintptr_t)ctxp;
     ID3D11DeviceContext_OMGetDepthStencilState(x, &cur, &ref);
