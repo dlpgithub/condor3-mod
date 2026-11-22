@@ -332,18 +332,25 @@ static void DoDump(const char* name);
 #define YAW_CALL1 0x6fb543
 #define YAW_CALL2 0x6fb673
 #define REL(p) do { if (p) { (p)->lpVtbl->Release(p); (p) = NULL; } } while (0)
-typedef struct { ID3D11Texture2D* tex; ID3D11RenderTargetView* rtv; ID3D11ShaderResourceView* srv; } OvTarget;
+// With MSAA on (Windows setups usually; MSAACount in Setup.ini) the game's colour target and depth buffer are multisampled. The
+// string is then drawn into multisampled targets of the same sample count and quality (they are bound together with the game's
+// depth view, which must match) and resolved into the single-sampled textures the final pass reads, like the scene colour itself.
+// The layer formula is linear, so resolving (averaging the samples) keeps it exact at the string's antialiased edges.
+typedef struct { ID3D11Texture2D* tex; ID3D11RenderTargetView* rtv; ID3D11ShaderResourceView* srv; ID3D11Texture2D* msTex; ID3D11RenderTargetView* msRtv; } OvTarget;
 static OvTarget g_ov[2];               // 0 = black, 1 = white
-static UINT g_ovW = 0, g_ovH = 0;
+static UINT g_ovW = 0, g_ovH = 0, g_ovSamples = 0, g_ovQuality = 0;
 static int g_ovDrawn = 0;              // set by YawDraw, consumed by HudPre
 static int g_yawState = 0;             // 1 = call sites patched, <0 = unexpected code
 static volatile int g_yawLayer = 1;    // debug: cmd yawlayer on|off
 
-static void OvRelease(void) { int i; for (i = 0; i < 2; i++) { REL(g_ov[i].srv); REL(g_ov[i].rtv); REL(g_ov[i].tex); } g_ovW = g_ovH = 0; }
-static int OvEnsure(ID3D11Device* dev, UINT w, UINT h) {
+static void OvRelease(void) { int i; for (i = 0; i < 2; i++) { REL(g_ov[i].msRtv); REL(g_ov[i].msTex); REL(g_ov[i].srv); REL(g_ov[i].rtv); REL(g_ov[i].tex); } g_ovW = g_ovH = g_ovSamples = g_ovQuality = 0; }
+static int OvEnsure(ID3D11Device* dev, UINT w, UINT h, DXGI_SAMPLE_DESC sd) {
     D3D11_TEXTURE2D_DESC d;
     int i;
-    if (g_ov[0].tex && g_ovW == w && g_ovH == h) return 1;
+    static UINT bad[4];                                          // shape that could not be created: not again every frame
+    if (g_ov[0].tex && g_ovW == w && g_ovH == h && g_ovSamples == sd.Count && g_ovQuality == sd.Quality) return 1;
+    if (bad[0] == w && bad[1] == h && bad[2] == sd.Count && bad[3] == sd.Quality) return 0;
+    bad[0] = w; bad[1] = h; bad[2] = sd.Count; bad[3] = sd.Quality;            // cleared below on success
     OvRelease();
     memset(&d, 0, sizeof d);
     d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -353,7 +360,18 @@ static int OvEnsure(ID3D11Device* dev, UINT w, UINT h) {
             FAILED(ID3D11Device_CreateRenderTargetView(dev, (ID3D11Resource*)g_ov[i].tex, NULL, &g_ov[i].rtv)) ||
             FAILED(ID3D11Device_CreateShaderResourceView(dev, (ID3D11Resource*)g_ov[i].tex, NULL, &g_ov[i].srv))) { OvRelease(); return 0; }
     }
-    g_ovW = w; g_ovH = h;
+    if (sd.Count > 1) {
+        d.SampleDesc = sd; d.BindFlags = D3D11_BIND_RENDER_TARGET;
+        for (i = 0; i < 2; i++) {
+            if (FAILED(ID3D11Device_CreateTexture2D(dev, &d, NULL, &g_ov[i].msTex)) ||
+                FAILED(ID3D11Device_CreateRenderTargetView(dev, (ID3D11Resource*)g_ov[i].msTex, NULL, &g_ov[i].msRtv))) {
+                if (g_logf) { fprintf(g_logf, "postfx: yaw string layer: no %ux%u target with %u samples (quality %u)\n", w, h, sd.Count, sd.Quality); fflush(g_logf); }
+                OvRelease(); return 0;
+            }
+        }
+    }
+    g_ovW = w; g_ovH = h; g_ovSamples = sd.Count; g_ovQuality = sd.Quality; memset(bad, 0, sizeof bad);
+    if (g_logf) { fprintf(g_logf, "postfx: yaw string layer targets %ux%u, %u samples\n", w, h, sd.Count); fflush(g_logf); }
     return 1;
 }
 
@@ -379,12 +397,14 @@ static void __attribute__((regparm(1), used, noinline)) YawDraw(uint32_t obj) {
         if (res) {
             ID3D11Texture2D_GetDesc((ID3D11Texture2D*)res, &cd);
             ID3D11DeviceContext_GetDevice(x, &dev);
-            if (dev && cd.SampleDesc.Count == 1 && OvEnsure(dev, cd.Width, cd.Height)) {
+            if (dev && OvEnsure(dev, cd.Width, cd.Height, cd.SampleDesc)) {
                 static const FLOAT clr[2][4] = { { 0, 0, 0, 0 }, { 1, 1, 1, 1 } };
                 for (i = 0; i < 2; i++) {
-                    ID3D11DeviceContext_ClearRenderTargetView(x, g_ov[i].rtv, clr[i]);
-                    ID3D11DeviceContext_OMSetRenderTargets(x, 1, &g_ov[i].rtv, dsv);
+                    ID3D11RenderTargetView* t = g_ov[i].msRtv ? g_ov[i].msRtv : g_ov[i].rtv;
+                    ID3D11DeviceContext_ClearRenderTargetView(x, t, clr[i]);
+                    ID3D11DeviceContext_OMSetRenderTargets(x, 1, &t, dsv);
                     DelphiCall(fn, obj, 0, 0);
+                    if (g_ov[i].msTex) ID3D11DeviceContext_ResolveSubresource(x, (ID3D11Resource*)g_ov[i].tex, 0, (ID3D11Resource*)g_ov[i].msTex, 0, DXGI_FORMAT_R8G8B8A8_UNORM);
                 }
                 ID3D11DeviceContext_OMSetRenderTargets(x, 8, rtv, dsv);
                 g_ovDrawn = 1;
