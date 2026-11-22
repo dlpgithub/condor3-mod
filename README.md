@@ -14,7 +14,9 @@ You only need part 3 if you want to make your own landscapes.
 ## Requirements
 - **Condor 3 version 3.1.0** exactly. The mod hooks into fixed places of Condor.exe; with another version it does not work
   (uninstall it then, see below).
-- Windows 10/11 (64-bit), or a Mac with CrossOver (Condor running in a CrossOver bottle).
+- Windows 10/11 (64-bit), or a Mac with CrossOver (Condor running in a CrossOver bottle). On the Mac the bottle needs:
+  - **Intel Macs:** this custom DXVK, [trueToastedCode/DXVK-macOS](https://github.com/trueToastedCode/DXVK-macOS), together with MoltenVK.
+  - **Apple Silicon:** [DXMT](https://github.com/3Shain/dxmt), together with [RosettaHack x87 + JIT](https://github.com/Lifeisawful/rosettax87_jit).
 - For the compiler: the platform in the package name (`...-windows.zip`, `...-macos-x86_64.zip`, `...-linux-x86_64.zip`), a GPU
   with DirectX 12, Metal or Vulkan (or `--cpu`), enough free disk space (a city landscape takes several GB, plus a temporary work folder).
 
