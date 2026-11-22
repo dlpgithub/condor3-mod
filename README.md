@@ -59,6 +59,21 @@ Then start Condor as usual. The installer copies `d3dx.dll`, `c3helper.exe`, the
 **Uninstall:** `scripts\postfx.bat uninstall "C:\Condor3"` / `scripts/postfx.sh uninstall ~/Condor3`. This puts the original
 `d3dx.dll` back and removes `postfx`, `Effects\fx` and `c3helper.exe` (your settings in `postfx` are deleted too).
 
+## Compiling from source (Windows)
+1. Install WSL (Windows Subsystem for Linux), Docker Desktop and VS Code with the "Dev Containers" extension.
+2. Open the repository folder in VS Code and choose "Reopen in Container".
+3. In the container's Linux terminal:
+
+       scripts/build_docker.sh                      # builds build/d3dx.dll and build/c3helper.exe
+       ln -s /mnt/c/Condor3 ~/Condor3               # the shader build expects the game in ~/Condor3
+       python3 shaders/build_shaders.py build       # patched game shaders -> shaders/build/Effects/fx
+
+4. Close Condor and install from a Windows command prompt opened in the repository folder:
+
+       scripts\postfx.bat install "C:\Condor3"
+
+If something does not work, ask Claude (or another AI assistant) with the error message first, before opening an issue.
+
 ## In the game
 | key | |
 |---|---|
