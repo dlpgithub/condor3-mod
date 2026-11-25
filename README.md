@@ -38,8 +38,7 @@ You only need part 3 if you want to make your own landscapes.
 | `scripts/postfx.sh` | install / uninstall on the Mac (CrossOver) |
 | `scripts/tune.sh` | Mac: change tuning values while the game runs (`scripts/tune.sh lut_strength 0.5`) |
 | `bin/tiles2condor_v2` (`.exe` on Windows) | the landscape compiler |
-| `examples/orly.json`, `examples/eiffel.json` | example compiler settings (Paris Orly with its three runways; Eiffel tower area) |
-| `examples/orly_custom_runway.json` | Orly with custom high-resolution runways |
+| `examples/orly_custom_runway.json`, `examples/eiffel.json` | example compiler settings (Paris Orly with its three custom high-resolution runways; Eiffel tower area) |
 | `assets/runway/` | textures for custom runways (asphalt, concrete, grass, markings paint) |
 | `docs/TILES2CONDOR.md` | complete reference of the compiler settings and output files |
 | `licenses/` | licences of included third-party code (Dobby hooking library) |
@@ -123,7 +122,7 @@ longer than 30 ms and why), `c3helper.log` (the helper loading the landscape).
 1. **Export** the area with earth-rea as "3D Tiles - one glb per file". Several exports can be combined (earth-rea limits one export
    to 5000 tiles), and they may mix detail levels: everywhere the finest one is used. A good mix: level 17 for the surroundings,
    level 19 for the area you fly in, level 20 for landmarks.
-2. **Settings:** copy `examples/orly.json` and adapt it (airports with their runway ends, texture size, margin around the data).
+2. **Settings:** copy `examples/orly_custom_runway.json` and adapt it (airports with their runway ends, texture size, margin around the data).
    The full list is in `docs/TILES2CONDOR.md`.
 3. **Compile** into Condor's `Landscapes` folder; the last part of the path becomes the landscape name:
 

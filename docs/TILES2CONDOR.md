@@ -21,9 +21,9 @@ Needs python3 with numpy and Pillow (`pip3 install numpy pillow`; the Mac's syst
 Typical run for the Orly export:
 ```
 cd /Users/lennard/Desktop/condor3-mod
-python3 tools/tiles2condor.py /Users/lennard/Downloads/earth-3dtiles-66e4c38d examples/orly.json /Users/lennard/Condor3/Landscapes/Orly2 --only plan
+python3 tools/tiles2condor.py /Users/lennard/Downloads/earth-3dtiles-66e4c38d examples/orly_custom_runway.json /Users/lennard/Condor3/Landscapes/Orly2 --only plan
 open /Users/lennard/Downloads/earth-3dtiles-66e4c38d/_condor_work/plan_levels.png
-python3 tools/tiles2condor.py /Users/lennard/Downloads/earth-3dtiles-66e4c38d examples/orly.json /Users/lennard/Condor3/Landscapes/Orly2
+python3 tools/tiles2condor.py /Users/lennard/Downloads/earth-3dtiles-66e4c38d examples/orly_custom_runway.json /Users/lennard/Condor3/Landscapes/Orly2
 ```
 The last line of the airports stage prints `TPPosX / TPPosY / TPPosZ` for each airport (for the flight plan file); in the game simply pick the
 landscape and an airport in the flight planner.
@@ -73,7 +73,7 @@ level must cover to count. Rendering (stage raster) happens per Condor tile at t
 ```
 - One entry = one Condor airport = ONE runway (Condor's `.apt` knows a single runway per airport). `from` / `to` are the lat, lon of the two
   runway ends; the glider starts 200 m after `from`, heading towards `to`. Several runways of one real airport = several entries
-  (`examples/orly.json` has Orly's three). Optional: `primary_reversed`, `tow_primary_left`, `tow_secondary_left`.
+  (`examples/orly_custom_runway.json` has Orly's three). Optional: `primary_reversed`, `tow_primary_left`, `tow_secondary_left`.
 - **Runway look** (v2 compiler): by default the runway is the photo of the terrain texture (`"runway_look": "photo"`). With
   `"runway_look": "custom"` in an airport entry the runway gets a high-resolution surface instead, made from the textures in
   `assets/runway/` (or the folder given as top-level `"runway_textures"`): asphalt with rubber in the touchdown zones, repairs and
