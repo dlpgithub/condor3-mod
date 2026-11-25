@@ -9,7 +9,8 @@ rem The second argument is the folder that contains Condor.exe. If it is left ou
 rem CONDOR_DIR is used.
 rem
 rem What install does:
-rem   1. backs up the game's own d3dx.dll as d3dx.dll.before_postfx (only the first time)
+rem   1. copies the game's own d3dx.dll to real_d3dx.dll (only if real_d3dx.dll does not exist yet).
+rem      The mod forwards all d3dx calls to real_d3dx.dll, so it must be the original DLL.
 rem   2. copies build\d3dx.dll (the prebuilt mod) over d3dx.dll
 rem   3. creates <game>\postfx with postfx.hlsl and the colour LUT (postfx\user\lut.cube, else the default one)
 rem   4. copies the patched shaders from shaders\build\Effects\fx into <game>\Effects\fx
@@ -30,7 +31,9 @@ if not exist "%GAME%\Condor.exe" (
   echo "%GAME%" does not contain Condor.exe - pass the Condor 3 folder as the second argument.
   exit /b 1
 )
-set "BAK=%GAME%\d3dx.dll.before_postfx"
+set "REAL=%GAME%\real_d3dx.dll"
+rem backup name used by older versions of this script
+set "OLDBAK=%GAME%\d3dx.dll.before_postfx"
 
 if /i "%CMD%"=="install" goto install
 if /i "%CMD%"=="uninstall" goto uninstall
@@ -47,7 +50,22 @@ if not errorlevel 1 (
   echo Condor.exe is running - close it first, then run install again.
   exit /b 1
 )
-if not exist "%BAK%" copy /y "%GAME%\d3dx.dll" "%BAK%" >nul
+if not exist "%REAL%" (
+  if exist "%OLDBAK%" (
+    copy /y "%OLDBAK%" "%REAL%" >nul || exit /b 1
+  ) else (
+    if not exist "%GAME%\d3dx.dll" (
+      echo "%GAME%\d3dx.dll" is missing - reinstall Condor or restore d3dx.dll first.
+      exit /b 1
+    )
+    fc /b "%GAME%\d3dx.dll" "%ROOT%\build\d3dx.dll" >nul 2>&1 && (
+      echo "%GAME%\d3dx.dll" is already the mod and real_d3dx.dll is missing - restore the original d3dx.dll first.
+      exit /b 1
+    )
+    copy /y "%GAME%\d3dx.dll" "%REAL%" >nul || exit /b 1
+  )
+)
+if exist "%OLDBAK%" del /q "%OLDBAK%"
 copy /y "%ROOT%\build\d3dx.dll" "%GAME%\d3dx.dll" >nul || exit /b 1
 if not exist "%GAME%\postfx" mkdir "%GAME%\postfx"
 copy /y "%ROOT%\postfx\postfx.hlsl" "%GAME%\postfx\postfx.hlsl" >nul || exit /b 1
@@ -80,7 +98,14 @@ if not errorlevel 1 (
   echo Condor.exe is running - close it first, then run uninstall again.
   exit /b 1
 )
-if exist "%BAK%" move /y "%BAK%" "%GAME%\d3dx.dll" >nul
+if exist "%REAL%" (
+  move /y "%REAL%" "%GAME%\d3dx.dll" >nul || exit /b 1
+) else if exist "%OLDBAK%" (
+  move /y "%OLDBAK%" "%GAME%\d3dx.dll" >nul || exit /b 1
+) else (
+  echo Warning: real_d3dx.dll not found - d3dx.dll was left unchanged.
+)
+if exist "%OLDBAK%" del /q "%OLDBAK%"
 if exist "%GAME%\postfx" rmdir /s /q "%GAME%\postfx"
 rem the game's own .fxc shaders are never modified; the mod only adds Effects\fx
 if exist "%GAME%\Effects\fx" rmdir /s /q "%GAME%\Effects\fx"

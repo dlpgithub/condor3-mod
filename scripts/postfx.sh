@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs / removes the post-processing build in the Condor 3 folder.
-#   scripts/postfx.sh install     backs up the current d3dx.dll, installs build/d3dx.dll, postfx/postfx.hlsl + colour LUT,
+#   scripts/postfx.sh install     copies the game's d3dx.dll to real_d3dx.dll (if not there yet), installs build/d3dx.dll, postfx/postfx.hlsl + colour LUT,
 #                                 the patched shaders (shaders/build/Effects/fx -> <game>/Effects/fx) and build/c3helper.exe
 #   scripts/postfx.sh uninstall   restores the backed-up d3dx.dll and removes <game>/postfx, <game>/Effects/fx, c3helper.exe
 #   scripts/postfx.sh sync        copies only postfx.hlsl (the running game hot-reloads it)
@@ -9,11 +9,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GAME="${2:-${CONDOR_DIR:-$HOME/Condor3}}"
 case "${1:-}" in install|uninstall|sync) [ -f "$GAME/Condor.exe" ] || { echo "$GAME does not contain Condor.exe: $0 ${1} /path/to/Condor3"; exit 1; } ;; esac
-BAK="$GAME/d3dx.dll.before_postfx"
+REAL="$GAME/real_d3dx.dll"            # the mod forwards all d3dx calls to this (the game's original d3dx.dll)
+OLDBAK="$GAME/d3dx.dll.before_postfx"  # backup name used by older versions of this script
 case "${1:-}" in
   install)
     [ -f "$ROOT/build/d3dx.dll" ] || { echo "build first: scripts/build_docker.sh [Debug]"; exit 1; }
-    [ -f "$BAK" ] || cp "$GAME/d3dx.dll" "$BAK"
+    if [ ! -f "$REAL" ]; then
+      if [ -f "$OLDBAK" ]; then cp "$OLDBAK" "$REAL"
+      else
+        [ -f "$GAME/d3dx.dll" ] || { echo "$GAME/d3dx.dll is missing: reinstall Condor or restore d3dx.dll first"; exit 1; }
+        if cmp -s "$GAME/d3dx.dll" "$ROOT/build/d3dx.dll"; then
+          echo "$GAME/d3dx.dll is already the mod and real_d3dx.dll is missing: restore the original d3dx.dll first"; exit 1
+        fi
+        cp "$GAME/d3dx.dll" "$REAL"
+      fi
+    fi
+    rm -f "$OLDBAK"
     cp "$ROOT/build/d3dx.dll" "$GAME/d3dx.dll"
     mkdir -p "$GAME/postfx"; cp "$ROOT/postfx/postfx.hlsl" "$GAME/postfx/"
     if [ ! -f "$GAME/postfx/lut.cube" ]; then
@@ -28,7 +39,10 @@ case "${1:-}" in
     echo "Installed. Start Condor normally.  F9 = effect on/off, F8 = reload shader, F10 = capture frame."
     echo "Log: $GAME/postfx/postfx.log   Remove again: scripts/postfx.sh uninstall" ;;
   uninstall)
-    [ -f "$BAK" ] && mv "$BAK" "$GAME/d3dx.dll"
+    if [ -f "$REAL" ]; then mv -f "$REAL" "$GAME/d3dx.dll"
+    elif [ -f "$OLDBAK" ]; then mv -f "$OLDBAK" "$GAME/d3dx.dll"
+    else echo "Warning: real_d3dx.dll not found - d3dx.dll was left unchanged"; fi
+    rm -f "$OLDBAK"
     rm -rf "$GAME/postfx" "$GAME/Effects/fx"; rm -f "$GAME/c3helper.exe"
     echo "Restored the previous d3dx.dll, removed $GAME/postfx, $GAME/Effects/fx and c3helper.exe" ;;
   sync)

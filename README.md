@@ -28,7 +28,7 @@ You only need part 3 if you want to make your own landscapes.
 | `README.md` | this file |
 | `README_POSTFX.md` | technical notes on the picture effects and the full [remote control](README_POSTFX.md#remote-control) reference |
 | `VERSION.txt` | which version this is, for which platform the compiler is |
-| `build/d3dx.dll` | the mod. It replaces Condor's own `d3dx.dll` (the original is backed up as `d3dx.dll.before_postfx`) |
+| `build/d3dx.dll` | the mod. It replaces Condor's own `d3dx.dll` (the original is kept as `real_d3dx.dll`, which the mod forwards to) |
 | `build/c3helper.exe` | the autogen helper (64-bit). Without it the mod leaves autogen to Condor as usual |
 | `postfx/postfx.hlsl` | the picture effects (shader). Copied to `<Condor>\postfx\`; its first lines list everything you can tune |
 | `postfx/default_lut/lut.cube`, `postfx/user/lut.cube` | colour looks (LUTs). The installer uses `user/lut.cube` if present, else the default |
